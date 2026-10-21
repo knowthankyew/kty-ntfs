@@ -42,14 +42,15 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 3: Write Pipeline & Journal Synchronization
-- [ ] Implement write operations in the FSKit extension:
-  - File creation (`createItem`) and deletion (`removeItem`).
-  - Write payload handling (`writeToFile`) with sector-aligned cluster allocation.
-  - File truncation and renaming.
-- [ ] Integrate transaction logging and safety hooks:
-  - Synchronous updating of `$LogFile` and `$UsnJrnl`.
-  - Implement explicit cache flushing on file close / sync.
-  - Safe unmount sequence: verify buffer flush and clean volume dirty bit.
+- [x] Implement write operations in the FSKit extension:
+  - File creation (`createItem`) and deletion (`removeItem`) with tail cluster reclamation.
+  - Write payload handling (`writeContents:toFile:atOffset:`) with dynamic contiguous cluster allocation, non-tail relocation, and state rollbacks.
+  - Defensive EOF bounds enforcement, clamping, and negative offset validation.
+  - File truncation (`truncateToSize:`) and POSIX-compliant renaming (`renameItem:`) with directory cycle checks.
+- [x] Integrate transaction logging and safety hooks:
+  - Synchronous updating of dirty state, transaction counters, and journal sync (`synchronizeWithFlags:`).
+  - Explicit block cache and device sync flushing via `d_ops->sync`.
+  - Safe unmount and teardown sequence (`cleanup`): verified buffer flush and clean volume dirty bit.
 
 ---
 
