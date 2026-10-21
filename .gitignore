@@ -24,7 +24,6 @@ Package.resolved
 CMakeFiles/
 CMakeCache.txt
 *.cmake
-Makefile
 
 # Binaries & Libraries
 *.o

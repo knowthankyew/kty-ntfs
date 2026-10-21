@@ -5,14 +5,14 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 0: Workspace Setup & Build Infrastructure
-- [ ] Establish repository structure:
+- [x] Establish repository structure:
   - `src/core/` (C engine)
   - `src/fskit/` (Swift/ObjC FSKit Extension)
   - `src/daemon/` (DiskArbitration daemon `kty-ntfsd`)
   - `src/cli/` (CLI frontend `kty-ntfs`)
   - `tests/` (Unit and integration harness)
-- [ ] Configure build system (CMake / Swift Package Manager / Xcode Project) to output universal Mach-O binaries (`arm64` and `x86_64`).
-- [ ] Setup local ad-hoc code-signing configuration for FSKit extension development.
+- [x] Configure build system (universal Mach-O output for `arm64` and `x86_64`).
+- [x] Setup local ad-hoc code-signing configuration and entitlements for FSKit development.
 
 ---
 
