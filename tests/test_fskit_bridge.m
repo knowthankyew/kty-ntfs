@@ -429,6 +429,54 @@ int main(void) {
         assert(payloadReadFinished);
         assert(memcmp([readPayloadBuf mutableBytes], payload, sizeof(payload)) == 0);
 
+        /* 4D-1: Read at or past EOF defensive boundary checks */
+        MockFileDataBuffer *eofBuf = [[MockFileDataBuffer alloc] initWithLength:512];
+        __block BOOL eofReadFinished = NO;
+        [writeVol readFromFile:createdItem offset:sizeof(payload) length:512 intoBuffer:(FSMutableFileDataBuffer *)eofBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == 0); /* Must return 0 at EOF */
+            eofReadFinished = YES;
+        }];
+        assert(eofReadFinished);
+
+        eofReadFinished = NO;
+        [writeVol readFromFile:createdItem offset:sizeof(payload) + 1024 length:512 intoBuffer:(FSMutableFileDataBuffer *)eofBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == 0); /* Must return 0 past EOF */
+            eofReadFinished = YES;
+        }];
+        assert(eofReadFinished);
+
+        /* 4D-2: Read spanning EOF clamped to available file bytes */
+        eofReadFinished = NO;
+        const uint8_t *payloadBytes = (const uint8_t *)payloadData.bytes;
+        [writeVol readFromFile:createdItem offset:sizeof(payload) - 100 length:512 intoBuffer:(FSMutableFileDataBuffer *)eofBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == 100); /* Clamped to 100 remaining bytes */
+            assert(memcmp([eofBuf mutableBytes], payloadBytes + sizeof(payload) - 100, 100) == 0);
+            eofReadFinished = YES;
+        }];
+        assert(eofReadFinished);
+
+        /* 4D-3: Negative offset rejection */
+        __block BOOL negOffsetRejected = NO;
+        [writeVol readFromFile:createdItem offset:-1 length:512 intoBuffer:(FSMutableFileDataBuffer *)eofBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(actuallyRead == 0);
+            assert(error != nil);
+            assert(error.code == EINVAL);
+            negOffsetRejected = YES;
+        }];
+        assert(negOffsetRejected);
+
+        negOffsetRejected = NO;
+        [writeVol writeContents:payloadData toFile:createdItem atOffset:-1 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(actuallyWritten == 0);
+            assert(error != nil);
+            assert(error.code == EINVAL);
+            negOffsetRejected = YES;
+        }];
+        assert(negOffsetRejected);
+
         /* 4E: Directory lookup of newly created file */
         __block BOOL lookupFinished = NO;
         [writeVol lookupItemNamed:testFile inDirectory:writeVol.rootItem replyHandler:^(FSItem * _Nullable theItem, FSFileName * _Nullable itemName, NSError * _Nullable error) {
@@ -507,7 +555,85 @@ int main(void) {
         }];
         assert(postRemoveLookupFailed);
 
-        /* 4J: Journal sync & clean teardown */
+        /* 4J: Multi-file cluster allocation isolation & collision prevention */
+        FSFileName *fnA = [[FSFileName alloc] initWithCString:"fileA.dat"];
+        FSFileName *fnB = [[FSFileName alloc] initWithCString:"fileB.dat"];
+        __block KTYItem *itemA = nil;
+        __block KTYItem *itemB = nil;
+
+        [writeVol createItemNamed:fnA type:FSItemTypeFile inDirectory:writeVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItemName;
+            assert(error == nil);
+            itemA = (KTYItem *)newItem;
+        }];
+        assert(itemA != nil);
+
+        [writeVol createItemNamed:fnB type:FSItemTypeFile inDirectory:writeVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItemName;
+            assert(error == nil);
+            itemB = (KTYItem *)newItem;
+        }];
+        assert(itemB != nil);
+        assert(itemB.diskOffset > itemA.diskOffset);
+
+        /* Write 4KB of pattern 0xBB into file B */
+        uint8_t patB[4096];
+        memset(patB, 0xBB, sizeof(patB));
+        NSData *dataB = [NSData dataWithBytes:patB length:sizeof(patB)];
+        [writeVol writeContents:dataB toFile:itemB atOffset:0 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(patB));
+        }];
+
+        /* Write 8KB of pattern 0xAA into file A (triggers dynamic cluster growth beyond initial 4KB) */
+        uint8_t patA[8192];
+        memset(patA, 0xAA, sizeof(patA));
+        NSData *dataA = [NSData dataWithBytes:patA length:sizeof(patA)];
+        [writeVol writeContents:dataA toFile:itemA atOffset:0 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(patA));
+        }];
+
+        /* Assert File B is untouched and bit-for-bit pristine */
+        MockFileDataBuffer *bufB = [[MockFileDataBuffer alloc] initWithLength:sizeof(patB)];
+        [writeVol readFromFile:itemB offset:0 length:sizeof(patB) intoBuffer:(FSMutableFileDataBuffer *)bufB replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == sizeof(patB));
+        }];
+        assert(memcmp([bufB mutableBytes], patB, sizeof(patB)) == 0);
+
+        /* Assert File A contains full 8KB of pattern 0xAA */
+        MockFileDataBuffer *bufA = [[MockFileDataBuffer alloc] initWithLength:sizeof(patA)];
+        [writeVol readFromFile:itemA offset:0 length:sizeof(patA) intoBuffer:(FSMutableFileDataBuffer *)bufA replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == sizeof(patA));
+        }];
+        assert(memcmp([bufA mutableBytes], patA, sizeof(patA)) == 0);
+
+        /* 4K: POSIX rename validation tests */
+        /* Self rename no-op */
+        [writeVol renameItem:itemA inDirectory:writeVol.rootItem named:fnA toNewName:fnA inDirectory:writeVol.rootItem overItem:nil replyHandler:^(FSFileName * _Nullable newName, NSError * _Nullable error) {
+            assert(error == nil);
+            assert([newName.string isEqualToString:fnA.string]);
+        }];
+
+        /* Empty destination name rejected */
+        FSFileName *emptyName = [[FSFileName alloc] initWithCString:""];
+        [writeVol renameItem:itemA inDirectory:writeVol.rootItem named:fnA toNewName:emptyName inDirectory:writeVol.rootItem overItem:nil replyHandler:^(FSFileName * _Nullable newName, NSError * _Nullable error) {
+            (void)newName;
+            assert(error != nil);
+            assert(error.code == EINVAL);
+        }];
+
+        /* Cleanup items */
+        [writeVol removeItem:itemA named:fnA fromDirectory:writeVol.rootItem replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+        }];
+        [writeVol removeItem:itemB named:fnB fromDirectory:writeVol.rootItem replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+        }];
+
+        /* 4L: Journal sync & clean teardown */
         __block BOOL writeSyncFinished = NO;
         [writeVol synchronizeWithFlags:0 replyHandler:^(NSError * _Nullable error) {
             assert(error == nil);

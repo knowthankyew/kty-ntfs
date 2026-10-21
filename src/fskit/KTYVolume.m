@@ -43,6 +43,7 @@ static int kty_fskit_sync_cb(void *ctx) {
 @property (nonatomic, strong) KTYItem *rootItem;
 @property (nonatomic, assign) uint64_t nextItemID;
 @property (nonatomic, assign) off_t nextClusterOffset;
+@property (nonatomic, assign) off_t totalDeviceSize;
 @property (nonatomic, assign) BOOL isDirty;
 @property (nonatomic, assign) uint64_t totalBytesWritten;
 @property (nonatomic, assign) uint32_t activeTransactions;
@@ -67,6 +68,7 @@ static int kty_fskit_sync_cb(void *ctx) {
         _activeTransactions = 0;
 
         s64 total_size = (s64)(resource.blockCount * resource.blockSize);
+        _totalDeviceSize = (off_t)total_size;
         int sector_size = (int)(resource.physicalBlockSize > 0 ? resource.physicalBlockSize : 512);
 
         _ntfsDevice = kty_device_alloc_resource(
@@ -99,6 +101,57 @@ static int kty_fskit_sync_cb(void *ctx) {
         _isMounted = NO;
         _activeTransactions = 0;
     }
+}
+
+- (BOOL)allocateClustersForFile:(KTYItem *)ktyItem
+                     neededSize:(uint64_t)neededSize
+                          error:(NSError **)error {
+    uint64_t neededAlloc = (neededSize + 4095) & ~4095ULL;
+    if (neededAlloc == 0) {
+        neededAlloc = 4096;
+    }
+
+    if (ktyItem.allocatedSize >= neededAlloc && ktyItem.diskOffset > 0) {
+        return YES;
+    }
+
+    /* Check if current allocation is at the tail of disk allocations */
+    if (ktyItem.diskOffset > 0 && (ktyItem.diskOffset + (off_t)ktyItem.allocatedSize) == self.nextClusterOffset) {
+        off_t additional = (off_t)(neededAlloc - ktyItem.allocatedSize);
+        if (self.totalDeviceSize > 0 && (self.nextClusterOffset + additional) > self.totalDeviceSize) {
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
+            return NO;
+        }
+        self.nextClusterOffset += additional;
+        ktyItem.allocatedSize = neededAlloc;
+        return YES;
+    }
+
+    /* File is not at tail (or has no offset); allocate new contiguous chunk at tail */
+    if (self.totalDeviceSize > 0 && (self.nextClusterOffset + (off_t)neededAlloc) > self.totalDeviceSize) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
+        return NO;
+    }
+
+    off_t newOffset = self.nextClusterOffset;
+    if (ktyItem.size > 0 && ktyItem.diskOffset > 0 && self.ntfsDevice && self.ntfsDevice->d_ops && NDevOpen(self.ntfsDevice)) {
+        size_t copyLen = (size_t)ktyItem.size;
+        void *tmpBuf = malloc(copyLen);
+        if (!tmpBuf) {
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOMEM userInfo:nil];
+            return NO;
+        }
+        s64 r = self.ntfsDevice->d_ops->pread(self.ntfsDevice, tmpBuf, (s64)copyLen, (s64)ktyItem.diskOffset);
+        if (r > 0) {
+            self.ntfsDevice->d_ops->pwrite(self.ntfsDevice, tmpBuf, r, (s64)newOffset);
+        }
+        free(tmpBuf);
+    }
+
+    self.nextClusterOffset += (off_t)neededAlloc;
+    ktyItem.diskOffset = newOffset;
+    ktyItem.allocatedSize = neededAlloc;
+    return YES;
 }
 
 - (void)dealloc {
@@ -247,6 +300,13 @@ static int kty_fskit_sync_cb(void *ctx) {
         KTYItem *ktyItem = (KTYItem *)item;
         if (newAttributes && [newAttributes respondsToSelector:@selector(isValid:)]) {
             if ([newAttributes isValid:FSItemAttributeSize] && ktyItem.itemType == FSItemTypeFile) {
+                if (newAttributes.size > ktyItem.allocatedSize) {
+                    NSError *allocErr = nil;
+                    if (![self allocateClustersForFile:ktyItem neededSize:newAttributes.size error:&allocErr]) {
+                        reply(nil, allocErr ?: [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]);
+                        return;
+                    }
+                }
                 [ktyItem truncateToSize:newAttributes.size];
                 _isDirty = YES;
                 _activeTransactions++;
@@ -365,9 +425,11 @@ static int kty_fskit_sync_cb(void *ctx) {
         }
 
         if (type == FSItemTypeFile) {
-            newItem.diskOffset = self.nextClusterOffset;
-            newItem.allocatedSize = 4096;
-            self.nextClusterOffset += 4096;
+            NSError *allocErr = nil;
+            if (![self allocateClustersForFile:newItem neededSize:4096 error:&allocErr]) {
+                reply(nil, nil, allocErr ?: [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]);
+                return;
+            }
         }
 
         [parentDir addChild:newItem];
@@ -389,7 +451,8 @@ static int kty_fskit_sync_cb(void *ctx) {
     (void)directory;
     (void)newAttributes;
     (void)contents;
-    reply(nil, nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EROFS userInfo:nil]);
+    int err = self.readOnly ? EROFS : ENOTSUP;
+    reply(nil, nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:err userInfo:nil]);
 }
 
 - (void)createLinkToItem:(FSItem *)item
@@ -400,7 +463,8 @@ static int kty_fskit_sync_cb(void *ctx) {
     (void)item;
     (void)name;
     (void)directory;
-    reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EROFS userInfo:nil]);
+    int err = self.readOnly ? EROFS : ENOTSUP;
+    reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:err userInfo:nil]);
 }
 
 - (void)removeItem:(FSItem *)item
@@ -436,6 +500,10 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
+        if (targetItem.diskOffset > 0 && (targetItem.diskOffset + (off_t)targetItem.allocatedSize) == self.nextClusterOffset) {
+            self.nextClusterOffset -= (off_t)targetItem.allocatedSize;
+        }
+
         [parentDir removeChildNamed:name.string];
         _isDirty = YES;
         _activeTransactions++;
@@ -453,13 +521,15 @@ static int kty_fskit_sync_cb(void *ctx) {
       replyHandler:(void(^)(FSFileName * _Nullable newName,
                             NSError * _Nullable error))reply {
     (void)item;
+    (void)overItem;
     @synchronized (self) {
         if (self.readOnly) {
             reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EROFS userInfo:nil]);
             return;
         }
 
-        if (!sourceName || !destinationName) {
+        if (!sourceName || sourceName.string.length == 0 ||
+            !destinationName || destinationName.string.length == 0) {
             reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
             return;
         }
@@ -467,13 +537,45 @@ static int kty_fskit_sync_cb(void *ctx) {
         KTYItem *srcDir = (sourceDirectory && [sourceDirectory isKindOfClass:[KTYItem class]]) ? (KTYItem *)sourceDirectory : self.rootItem;
         KTYItem *destDir = (destinationDirectory && [destinationDirectory isKindOfClass:[KTYItem class]]) ? (KTYItem *)destinationDirectory : self.rootItem;
 
+        if (srcDir.itemType != FSItemTypeDirectory || destDir.itemType != FSItemTypeDirectory) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTDIR userInfo:nil]);
+            return;
+        }
+
         KTYItem *target = [srcDir childNamed:sourceName.string];
         if (!target) {
             reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:nil]);
             return;
         }
 
-        if (overItem) {
+        /* Self-rename no-op */
+        if (srcDir == destDir && [sourceName.string isEqualToString:destinationName.string]) {
+            reply(destinationName, nil);
+            return;
+        }
+
+        /* Prevent renaming a directory into its own sub-tree */
+        if (target.itemType == FSItemTypeDirectory && [destDir.path hasPrefix:target.path]) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
+        /* Check destination conflict */
+        KTYItem *existing = [destDir childNamed:destinationName.string];
+        if (existing) {
+            if (existing.itemType == FSItemTypeDirectory) {
+                if (target.itemType != FSItemTypeDirectory) {
+                    reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EISDIR userInfo:nil]);
+                    return;
+                }
+                if (existing.children.count > 0) {
+                    reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTEMPTY userInfo:nil]);
+                    return;
+                }
+            } else if (target.itemType == FSItemTypeDirectory) {
+                reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTDIR userInfo:nil]);
+                return;
+            }
             [destDir removeChildNamed:destinationName.string];
         }
 
@@ -539,20 +641,37 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
+        if (offset < 0) {
+            reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
         if (!self.ntfsDevice || !self.ntfsDevice->d_ops) {
             reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil]);
             return;
         }
 
         off_t read_offset = offset;
+        size_t to_read = (length < buffer.length) ? length : buffer.length;
+
         if (item && [item isKindOfClass:[KTYItem class]]) {
             KTYItem *ktyItem = (KTYItem *)item;
+            if (ktyItem.itemType == FSItemTypeFile) {
+                if ((uint64_t)offset >= ktyItem.size) {
+                    /* At or past EOF */
+                    reply(0, nil);
+                    return;
+                }
+                uint64_t bytesAvailable = ktyItem.size - (uint64_t)offset;
+                if ((uint64_t)to_read > bytesAvailable) {
+                    to_read = (size_t)bytesAvailable;
+                }
+            }
             if (ktyItem.diskOffset > 0) {
                 read_offset = ktyItem.diskOffset + offset;
             }
         }
 
-        size_t to_read = (length < buffer.length) ? length : buffer.length;
         s64 res = self.ntfsDevice->d_ops->pread(self.ntfsDevice, [buffer mutableBytes], (s64)to_read, (s64)read_offset);
         if (res < 0) {
             reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil]);
@@ -579,6 +698,11 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
+        if (offset < 0) {
+            reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
         if (!item || ![item isKindOfClass:[KTYItem class]]) {
             reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
             return;
@@ -590,14 +714,28 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
-        /* Sector/cluster aligned space allocation */
         uint64_t endPos = (uint64_t)offset + contents.length;
+        if (endPos < (uint64_t)offset) {
+            reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EFBIG userInfo:nil]);
+            return;
+        }
+
+        uint64_t oldSize = ktyItem.size;
+        uint64_t oldAlloc = ktyItem.allocatedSize;
+        off_t oldOffset = ktyItem.diskOffset;
+        time_t oldMtime = ktyItem.mtime;
+
+        /* Allocate space via sector-aligned cluster management */
+        if (endPos > ktyItem.allocatedSize) {
+            NSError *allocErr = nil;
+            if (![self allocateClustersForFile:ktyItem neededSize:endPos error:&allocErr]) {
+                reply(0, allocErr ?: [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]);
+                return;
+            }
+        }
+
         if (endPos > ktyItem.size) {
             ktyItem.size = endPos;
-        }
-        uint64_t neededAlloc = (ktyItem.size + 4095) & ~4095ULL;
-        if (neededAlloc > ktyItem.allocatedSize) {
-            ktyItem.allocatedSize = neededAlloc;
         }
         ktyItem.mtime = time(NULL);
 
@@ -606,6 +744,11 @@ static int kty_fskit_sync_cb(void *ctx) {
             off_t write_offset = ktyItem.diskOffset + offset;
             s64 written = self.ntfsDevice->d_ops->pwrite(self.ntfsDevice, contents.bytes, (s64)contents.length, (s64)write_offset);
             if (written < 0) {
+                /* Roll back state on I/O error to preserve fail-closed consistency */
+                ktyItem.size = oldSize;
+                ktyItem.allocatedSize = oldAlloc;
+                ktyItem.diskOffset = oldOffset;
+                ktyItem.mtime = oldMtime;
                 reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil]);
                 return;
             }
