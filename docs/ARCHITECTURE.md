@@ -75,9 +75,11 @@ Apple’s modern user-space file system mechanism. It replaces traditional VFS k
 
 * **Protocols Implemented:**
   * `FSUnaryFileSystem`: Handles single-volume mounting lifecycle.
-  * `FSFileSystemBase`: Handles volume probing, identity queries, and capability flags.
-  * `FSFileSystemVolumeLifecycle`: Mount, synchronization, cache flush, and unmount.
-  * `FSFileSystemOperations`: Inode lookups, file creation, reading, writing, renaming, attribute queries, and deletion.
+  * `FSUnaryFileSystemOperations`: Handles resource probing (`probeResource`), loading (`loadResource`), and unloading (`unloadResource`).
+  * `FSVolumeOperations`: Inode lookups, file creation, item removal, and volume metadata.
+  * `FSVolumeReadWriteOperations`: File data reading, cluster allocation, writes, and cache sync.
+  * `FSVolumeXattrOperations`: Extended attributes translation to NTFS Alternate Data Streams (ADS).
+  * `FSVolumeRenameOperations`: Safe item rename and atomic directory restructuring.
 
 ### 4.3. Component 3: Forensic Hygiene & Policy Engine
 In digital evidence preservation, writing to a destination disk must not inadvertently modify timestamps, create arbitrary system files, or leave corrupt transaction states.

@@ -16,54 +16,58 @@
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>NSExtension</key>
+    <key>EXAppExtensionAttributes</key>
     <dict>
-        <key>NSExtensionPointIdentifier</key>
+        <key>EXExtensionPointIdentifier</key>
         <string>com.apple.fskit.fsmodule</string>
-        <key>NSExtensionPrincipalClass</key>
+        <key>EXExtensionPrincipalClass</key>
         <string>KTYUnaryFileSystem</string>
-    </dict>
-    <key>FSImplementation</key>
-    <array>
-        <string>UserFS</string>
-    </array>
-    <key>FSMediaTypes</key>
-    <dict>
-        <key>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</key>
+        <key>FSShortName</key>
+        <string>ntfs</string>
+        <key>FSSupportsBlockResources</key>
+        <true/>
+        <key>FSMediaTypes</key>
         <dict>
-            <key>FSMediaProperties</key>
+            <key>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</key>
             <dict>
-                <key>Content Hint</key>
-                <string>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</string>
-                <key>Leaf</key>
-                <true/>
+                <key>FSMediaProperties</key>
+                <dict>
+                    <key>Content Hint</key>
+                    <string>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</string>
+                    <key>Leaf</key>
+                    <true/>
+                </dict>
+                <key>FSProbeOrder</key>
+                <integer>500</integer>
             </dict>
-            <key>FSProbeOrder</key>
-            <integer>500</integer>
-        </dict>
-        <key>Windows_NTFS</key>
-        <dict>
-            <key>FSMediaProperties</key>
+            <key>Windows_NTFS</key>
             <dict>
-                <key>Content Hint</key>
-                <string>Windows_NTFS</string>
-                <key>Leaf</key>
-                <true/>
+                <key>FSMediaProperties</key>
+                <dict>
+                    <key>Content Hint</key>
+                    <string>Windows_NTFS</string>
+                    <key>Leaf</key>
+                    <true/>
+                </dict>
+                <key>FSProbeOrder</key>
+                <integer>500</integer>
             </dict>
-            <key>FSProbeOrder</key>
-            <integer>500</integer>
         </dict>
-    </dict>
-    <key>FSPersonalities</key>
-    <dict>
-        <key>NTFS</key>
+        <key>FSPersonalities</key>
         <dict>
-            <key>FSName</key>
-            <string>Windows NT File System (NTFS) [kty-ntfs]</string>
+            <key>NTFS</key>
+            <dict>
+                <key>FSName</key>
+                <string>Windows NT File System (NTFS) [kty-ntfs]</string>
+            </dict>
         </dict>
     </dict>
 </dict>
