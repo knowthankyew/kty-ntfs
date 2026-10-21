@@ -17,12 +17,16 @@ BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
 OBJ_DIR = $(BUILD_DIR)/obj
 
-.PHONY: all clean smoke_test test verify-invariants asan
+.PHONY: all clean smoke_test test verify-invariants audit-claims asan
 
 all: smoke_test
 
 $(BIN_DIR) $(OBJ_DIR)/arm64 $(OBJ_DIR)/x86_64:
 	@mkdir -p $@
+
+audit-claims:
+	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
+	@./scripts/audit-claims.py
 
 $(OBJ_DIR)/arm64/smoke_test.o: tests/smoke_test.c | $(OBJ_DIR)/arm64
 	@echo "==> Compiling arm64: $<"
@@ -63,7 +67,7 @@ asan:
 	$(MAKE) clean
 	$(MAKE) EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" smoke_test
 
-test: smoke_test
+test: smoke_test audit-claims
 
 clean:
 	@echo "==> Cleaning build artifacts..."

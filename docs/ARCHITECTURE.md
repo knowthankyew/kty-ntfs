@@ -8,6 +8,9 @@ Developed within the `knowthankyew` ecosystem, `kty-ntfs` provides a trusted, au
 
 The project is structured as an **autonomous background daemon (`kty-ntfsd`)** and a **companion CLI tool (`kty-ntfs`)** usable by any script, forensic pipeline, or manual workflow on the system.
 
+### Portfolio Licensing Distinction & Process Boundary Isolation
+While the broader `knowthankyew` portfolio defaults to the permissive **MIT License**, `kty-ntfs` incorporates and statically links against `libntfs-3g` and is licensed under **GPL-2.0-or-later**. To prevent viral GPL contagion into MIT-licensed client engines (`knowthankyew-extension`, `mac-screen-record`, `lease-audit`, etc.), `kty-ntfs` operates strictly across standard operating system process boundaries (CLI, filesystem mounts, and XPC), ensuring total legal and architectural separation.
+
 ---
 
 ## 2. Core Decisions & Baseline Requirements
