@@ -55,13 +55,17 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 4: Forensic Hygiene & Policy Engine
-- [ ] Implement path-based metadata filtering:
-  - Intercept and silently drop write attempts for `.DS_Store`, `.Spotlight-V100`, `.Trashes`, and `.fseventsd`.
+- [x] Implement path-based metadata filtering:
+  - Intercept and silently drop write attempts for `.DS_Store`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `.TemporaryItems`, and `._*` AppleDouble sidecars into memory tombstones.
+  - Zero disk clusters allocated and zero dirty-bit toggles for suppressed metadata; excluded from directory enumeration.
   - Implement `--allow-system-metadata` override flag with prominent warning outputs.
-- [ ] Extended Attribute (`xattr`) translation:
-  - Map macOS `xattrs` into NTFS Alternate Data Streams (ADS).
-  - Suppress generation of `._*` AppleDouble sidecar files.
-- [ ] Add integrity metadata logging (SHA-256 / BLAKE3 checksum calculations during writes for chain-of-custody).
+- [x] Extended Attribute (`xattr`) translation:
+  - Full conformance to `FSVolumeXattrOperations`: get, set, list, and delete extended attributes.
+  - Map macOS `xattrs` into NTFS Alternate Data Streams (ADS) and suppress AppleDouble `._*` file generation.
+- [x] Add integrity metadata logging (SHA-256 / BLAKE3 checksum calculations during writes for chain-of-custody):
+  - Hardware-accelerated CommonCrypto SHA-256 and official specification BLAKE3 tree-hashing engine in C.
+  - Automated calculation and publication of `kty.integrity.sha256` and `kty.integrity.blake3` into Alternate Data Streams.
+  - Bounded 64 KB streaming recomputation on segmented writes and stale hash invalidation on truncation.
 
 ---
 
