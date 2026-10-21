@@ -17,13 +17,13 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 1: Headless Engine Isolation (`libkty_ntfs_core`)
-- [ ] Import upstream `ntfs-3g` source code into `src/core/vendor/`.
-- [ ] Strip legacy dependencies:
+- [x] Import upstream `ntfs-3g` source code into `src/core/vendor/`.
+- [x] Strip legacy dependencies:
   - Remove all FUSE (`fuse.h`, `libfuse`) headers, wrappers, and daemon loops.
   - Remove POSIX command-line utilities and unnecessary tools.
-- [ ] Implement a clean C abstraction layer for device block I/O (`kty_io.c` / `kty_io.h`) compatible with macOS file descriptors and `FSBlockDeviceResource`.
-- [ ] Compile and verify `libkty_ntfs_core.a` static library across `arm64` and `x86_64`.
-- [ ] Write a standalone C test runner to verify reading boot sectors and basic $MFT records from a test disk image (`.img`).
+- [x] Implement a clean C abstraction layer for device block I/O (`kty_io.c` / `kty_io.h`) compatible with macOS file descriptors and `FSBlockDeviceResource`.
+- [x] Compile and verify `libkty_ntfs_core.a` static library across `arm64` and `x86_64`.
+- [x] Write a standalone C test runner to verify reading boot sectors and basic $MFT records from a test disk image (`.img`).
 
 ---
 

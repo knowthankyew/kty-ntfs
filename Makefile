@@ -5,43 +5,82 @@ SDKROOT ?= $(shell xcrun --sdk macosx --show-sdk-path)
 CC ?= clang
 SWIFTC ?= swiftc
 LIPO ?= lipo
+APPLE_LIBTOOL ?= libtool
 
 TARGET_OS_MIN = 14.0
 CFLAGS ?=
 EXTRA_CFLAGS ?=
-CFLAGS_COMMON = -isysroot $(SDKROOT) -Wall -Wextra -O2 -fstack-protector-strong $(EXTRA_CFLAGS) $(CFLAGS)
+INCLUDES = -Isrc/core/include -Isrc/core/include/ntfs-3g
+CFLAGS_COMMON = -isysroot $(SDKROOT) -Wall -Wextra -O2 -fstack-protector-strong -DHAVE_CONFIG_H $(INCLUDES) $(EXTRA_CFLAGS) $(CFLAGS)
 CFLAGS_ARM64 = $(CFLAGS_COMMON) -target arm64-apple-macos$(TARGET_OS_MIN)
 CFLAGS_X86_64 = $(CFLAGS_COMMON) -target x86_64-apple-macos$(TARGET_OS_MIN)
 
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
+LIB_DIR = $(BUILD_DIR)/lib
 OBJ_DIR = $(BUILD_DIR)/obj
 
-.PHONY: all clean smoke_test test verify-invariants audit-claims asan
+CORE_VENDOR_SRCS = $(wildcard src/core/vendor/libntfs-3g/*.c)
+CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c
 
-all: smoke_test
+CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o
+CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o
 
-$(BIN_DIR) $(OBJ_DIR)/arm64 $(OBJ_DIR)/x86_64:
+.PHONY: all clean core smoke_test test_ntfs_core test verify-invariants audit-claims asan
+
+all: core smoke_test test_ntfs_core
+
+$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor:
 	@mkdir -p $@
 
-audit-claims:
-	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
-	@./scripts/audit-claims.py
+# --- Core Static Library Compilation ---
 
-$(OBJ_DIR)/arm64/smoke_test.o: tests/smoke_test.c | $(OBJ_DIR)/arm64
+$(OBJ_DIR)/arm64/vendor/%.o: src/core/vendor/libntfs-3g/%.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64 (vendor): $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/vendor/%.o: src/core/vendor/libntfs-3g/%.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64 (vendor): $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(OBJ_DIR)/arm64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/arm64/vendor
 	@echo "==> Compiling arm64: $<"
 	$(CC) $(CFLAGS_ARM64) -c $< -o $@
 
-$(OBJ_DIR)/x86_64/smoke_test.o: tests/smoke_test.c | $(OBJ_DIR)/x86_64
+$(OBJ_DIR)/x86_64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64: $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(LIB_DIR)/arm64/libkty_ntfs_core.a: $(CORE_OBJS_ARM64) | $(LIB_DIR)/arm64
+	@echo "==> Creating arm64 static library: $@"
+	$(APPLE_LIBTOOL) -static -o $@ $^
+
+$(LIB_DIR)/x86_64/libkty_ntfs_core.a: $(CORE_OBJS_X86_64) | $(LIB_DIR)/x86_64
+	@echo "==> Creating x86_64 static library: $@"
+	$(APPLE_LIBTOOL) -static -o $@ $^
+
+$(LIB_DIR)/libkty_ntfs_core.a: $(LIB_DIR)/arm64/libkty_ntfs_core.a $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(LIB_DIR)
+	@echo "==> Creating universal fat archive: $@"
+	$(LIPO) -create -output $@ $^
+
+core: $(LIB_DIR)/libkty_ntfs_core.a
+	@echo "==> Universal libkty_ntfs_core.a built successfully."
+	$(LIPO) -info $(LIB_DIR)/libkty_ntfs_core.a
+
+# --- Phase 0 Smoke Test ---
+
+$(OBJ_DIR)/arm64/smoke_test.o: tests/smoke_test.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64: $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/smoke_test.o: tests/smoke_test.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 
 $(BIN_DIR)/smoke_test_arm64: $(OBJ_DIR)/arm64/smoke_test.o | $(BIN_DIR)
-	@echo "==> Linking arm64 slice: $@"
 	$(CC) $(CFLAGS_ARM64) $< -o $@
 
 $(BIN_DIR)/smoke_test_x86_64: $(OBJ_DIR)/x86_64/smoke_test.o | $(BIN_DIR)
-	@echo "==> Linking x86_64 slice: $@"
 	$(CC) $(CFLAGS_X86_64) $< -o $@
 
 $(BIN_DIR)/smoke_test: $(BIN_DIR)/smoke_test_arm64 $(BIN_DIR)/smoke_test_x86_64 | $(BIN_DIR)
@@ -49,25 +88,61 @@ $(BIN_DIR)/smoke_test: $(BIN_DIR)/smoke_test_arm64 $(BIN_DIR)/smoke_test_x86_64 
 	$(LIPO) -create -output $@ $^
 	@./scripts/codesign-adhoc.sh $@
 
-verify-invariants: $(BIN_DIR)/smoke_test
-	@echo "==> Auditing Mach-O binary for zero network symbols (KTY Invariant 1)..."
-	@if nm -u $(BIN_DIR)/smoke_test | grep -E -q "socket|connect|getaddrinfo|CFNetwork|URLSession"; then \
-		echo "ERROR: Forbidden network symbols detected in $(BIN_DIR)/smoke_test" >&2; \
-		exit 1; \
-	fi
-	@echo "==> Invariant verified: 0 network symbols found."
-
-smoke_test: $(BIN_DIR)/smoke_test verify-invariants
-	@echo "==> Verifying binary architectures:"
-	$(LIPO) -info $(BIN_DIR)/smoke_test
+smoke_test: $(BIN_DIR)/smoke_test
 	@echo "==> Executing smoke test:"
 	./$(BIN_DIR)/smoke_test
 
+# --- Phase 1 NTFS Core Test Harness ---
+
+$(OBJ_DIR)/arm64/test_ntfs_core.o: tests/test_ntfs_core.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64 test: $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/test_ntfs_core.o: tests/test_ntfs_core.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64 test: $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/test_ntfs_core_arm64: $(OBJ_DIR)/arm64/test_ntfs_core.o $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 test binary: $@"
+	$(CC) $(CFLAGS_ARM64) $^ -o $@
+
+$(BIN_DIR)/test_ntfs_core_x86_64: $(OBJ_DIR)/x86_64/test_ntfs_core.o $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 test binary: $@"
+	$(CC) $(CFLAGS_X86_64) $^ -o $@
+
+$(BIN_DIR)/test_ntfs_core: $(BIN_DIR)/test_ntfs_core_arm64 $(BIN_DIR)/test_ntfs_core_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal test binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+test_ntfs_core: $(BIN_DIR)/test_ntfs_core
+	@echo "==> Verifying binary architectures:"
+	$(LIPO) -info $(BIN_DIR)/test_ntfs_core
+	@echo "==> Executing NTFS Core test suite:"
+	./$(BIN_DIR)/test_ntfs_core
+
+# --- Audits & Quality Gates ---
+
+audit-claims:
+	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
+	@./scripts/audit-claims.py
+
+verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core
+	@echo "==> Auditing Mach-O binaries for zero network symbols (KTY Invariant 1)..."
+	@for bin in $^; do \
+		echo "    Checking $$bin..."; \
+		if nm -u $$bin | grep -E -q "socket|connect|getaddrinfo|CFNetwork|URLSession"; then \
+			echo "ERROR: Forbidden network symbols detected in $$bin" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@echo "==> Invariant verified: 0 network symbols found across all binaries."
+
+test: core smoke_test test_ntfs_core verify-invariants audit-claims
+
 asan:
 	$(MAKE) clean
-	$(MAKE) EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" smoke_test
-
-test: smoke_test audit-claims
+	$(MAKE) EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" test
 
 clean:
 	@echo "==> Cleaning build artifacts..."
