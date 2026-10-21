@@ -19,8 +19,13 @@ void kty_sha256_init(kty_sha256_ctx *ctx) {
 }
 
 void kty_sha256_update(kty_sha256_ctx *ctx, const void *data, size_t len) {
-    if (ctx && data && len > 0) {
-        CC_SHA256_Update(ctx, data, (CC_LONG)len);
+    if (!ctx || !data || len == 0) return;
+    const uint8_t *ptr = (const uint8_t *)data;
+    while (len > 0) {
+        CC_LONG chunk = (len > (size_t)UINT32_MAX) ? UINT32_MAX : (CC_LONG)len;
+        CC_SHA256_Update(ctx, ptr, chunk);
+        ptr += chunk;
+        len -= chunk;
     }
 }
 
@@ -236,8 +241,10 @@ static blake3_output_t parent_output(const uint32_t left_child_cv[8],
 }
 
 static void blake3_hasher_push_stack(kty_blake3_ctx *self, const uint32_t cv[8]) {
-    memcpy(&self->cv_stack[self->cv_stack_len * 8], cv, 32);
-    self->cv_stack_len++;
+    if (self->cv_stack_len < 54) {
+        memcpy(&self->cv_stack[self->cv_stack_len * 8], cv, 32);
+        self->cv_stack_len++;
+    }
 }
 
 static void blake3_hasher_pop_stack(kty_blake3_ctx *self, uint32_t out[8]) {

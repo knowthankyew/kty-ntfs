@@ -308,6 +308,28 @@ static int kty_fskit_sync_cb(void *ctx) {
         }
 
         KTYItem *ktyItem = (KTYItem *)item;
+        if (ktyItem.isForensicTombstone) {
+            _suppressedMetadataOperations++;
+            if (newAttributes && [newAttributes respondsToSelector:@selector(isValid:)]) {
+                if ([newAttributes isValid:FSItemAttributeSize]) {
+                    ktyItem.size = newAttributes.size;
+                }
+                if ([newAttributes isValid:FSItemAttributeMode]) {
+                    ktyItem.mode = newAttributes.mode;
+                }
+                if ([newAttributes isValid:FSItemAttributeModifyTime]) {
+                    ktyItem.mtime = newAttributes.modifyTime.tv_sec;
+                }
+                if ([newAttributes isValid:FSItemAttributeChangeTime]) {
+                    ktyItem.ctime = newAttributes.changeTime.tv_sec;
+                }
+            }
+            FSItemAttributes *attrs = [[FSItemAttributes alloc] init];
+            [ktyItem populateAttributes:attrs];
+            reply(attrs, nil);
+            return;
+        }
+
         if (newAttributes && [newAttributes respondsToSelector:@selector(isValid:)]) {
             if ([newAttributes isValid:FSItemAttributeSize] && ktyItem.itemType == FSItemTypeFile) {
                 if (newAttributes.size > ktyItem.allocatedSize) {
@@ -628,9 +650,17 @@ static int kty_fskit_sync_cb(void *ctx) {
             ? [NSString stringWithFormat:@"/%@", destinationName.string]
             : [NSString stringWithFormat:@"%@/%@", destDir.path, destinationName.string];
 
+        if ([KTYItem isSystemMetadataName:destinationName.string] && !self.allowSystemMetadata) {
+            target.isForensicTombstone = YES;
+            _suppressedMetadataOperations++;
+        }
+
         [destDir addChild:target];
-        _isDirty = YES;
-        _activeTransactions++;
+
+        if (!target.isForensicTombstone) {
+            _isDirty = YES;
+            _activeTransactions++;
+        }
 
         reply(destinationName, nil);
     }
@@ -817,7 +847,13 @@ static int kty_fskit_sync_cb(void *ctx) {
         }
 
         /* Update forensic integrity hashes (SHA-256 and BLAKE3) and ADS */
-        [ktyItem updateForensicHashesWithData:contents offset:(uint64_t)offset];
+        if (offset == 0 && contents.length == ktyItem.size) {
+            [ktyItem updateForensicHashesWithData:contents offset:(uint64_t)offset];
+        } else if (self.ntfsDevice && self.ntfsDevice->d_ops && NDevOpen(self.ntfsDevice)) {
+            [ktyItem recomputeForensicHashesFromDevice:self.ntfsDevice];
+        } else {
+            [ktyItem updateForensicHashesWithData:contents offset:(uint64_t)offset];
+        }
 
         _isDirty = YES;
         _totalBytesWritten += contents.length;
@@ -873,6 +909,14 @@ static int kty_fskit_sync_cb(void *ctx) {
         }
 
         KTYItem *ktyItem = (KTYItem *)item;
+        if (ktyItem.isForensicTombstone) {
+            _suppressedMetadataOperations++;
+            NSError *err = nil;
+            [ktyItem setXattrNamed:name.string data:value policy:policy error:&err];
+            reply(err);
+            return;
+        }
+
         NSError *err = nil;
         BOOL ok = [ktyItem setXattrNamed:name.string data:value policy:policy error:&err];
         if (ok) {

@@ -73,6 +73,8 @@
     self.mtime = time(NULL);
     self.sha256Hex = nil;
     self.blake3Hex = nil;
+    [self.extendedAttributes removeObjectForKey:@"kty.integrity.sha256"];
+    [self.extendedAttributes removeObjectForKey:@"kty.integrity.blake3"];
 }
 
 - (void)populateAttributes:(FSItemAttributes *)attributes {
@@ -175,35 +177,67 @@
     /* Auto-publish Alternate Data Streams for chain-of-custody */
     if (self.sha256Hex) {
         self.extendedAttributes[@"kty.integrity.sha256"] = [self.sha256Hex dataUsingEncoding:NSUTF8StringEncoding];
+    } else {
+        [self.extendedAttributes removeObjectForKey:@"kty.integrity.sha256"];
     }
     if (self.blake3Hex) {
         self.extendedAttributes[@"kty.integrity.blake3"] = [self.blake3Hex dataUsingEncoding:NSUTF8StringEncoding];
+    } else {
+        [self.extendedAttributes removeObjectForKey:@"kty.integrity.blake3"];
     }
 }
 
 - (void)recomputeForensicHashesFromDevice:(struct ntfs_device *)dev {
     if (!dev || !dev->d_ops || self.size == 0 || self.diskOffset == 0) return;
-    size_t len = (size_t)self.size;
-    void *buf = malloc(len);
+    
+    size_t chunk_size = 65536;
+    void *buf = malloc(chunk_size);
     if (!buf) return;
-    s64 r = dev->d_ops->pread(dev, buf, (s64)len, (s64)self.diskOffset);
-    if (r == (s64)len) {
+
+    kty_sha256_ctx s_ctx;
+    kty_blake3_ctx b_ctx;
+    kty_sha256_init(&s_ctx);
+    kty_blake3_init(&b_ctx);
+
+    uint64_t remaining = self.size;
+    off_t cur_offset = self.diskOffset;
+    BOOL failed = NO;
+
+    while (remaining > 0) {
+        size_t to_read = (remaining < chunk_size) ? (size_t)remaining : chunk_size;
+        s64 r = dev->d_ops->pread(dev, buf, (s64)to_read, (s64)cur_offset);
+        if (r != (s64)to_read) {
+            failed = YES;
+            break;
+        }
+        kty_sha256_update(&s_ctx, buf, to_read);
+        kty_blake3_update(&b_ctx, buf, to_read);
+        remaining -= to_read;
+        cur_offset += (off_t)to_read;
+    }
+    free(buf);
+
+    if (!failed) {
         uint8_t s_dig[KTY_SHA256_DIGEST_LEN];
         char s_hex[65];
-        kty_sha256_data(buf, len, s_dig);
+        kty_sha256_final(&s_ctx, s_dig);
         kty_digest_to_hex(s_dig, s_hex);
         self.sha256Hex = [NSString stringWithUTF8String:s_hex];
 
         uint8_t b_dig[KTY_BLAKE3_DIGEST_LEN];
         char b_hex[65];
-        kty_blake3_data(buf, len, b_dig);
+        kty_blake3_final(&b_ctx, b_dig);
         kty_digest_to_hex(b_dig, b_hex);
         self.blake3Hex = [NSString stringWithUTF8String:b_hex];
 
         self.extendedAttributes[@"kty.integrity.sha256"] = [self.sha256Hex dataUsingEncoding:NSUTF8StringEncoding];
         self.extendedAttributes[@"kty.integrity.blake3"] = [self.blake3Hex dataUsingEncoding:NSUTF8StringEncoding];
+    } else {
+        self.sha256Hex = nil;
+        self.blake3Hex = nil;
+        [self.extendedAttributes removeObjectForKey:@"kty.integrity.sha256"];
+        [self.extendedAttributes removeObjectForKey:@"kty.integrity.blake3"];
     }
-    free(buf);
 }
 
 /* =========================================================================

@@ -721,6 +721,28 @@ int main(void) {
         assert(hygieneVol.isDirty == NO);
         assert(hygieneVol.suppressedMetadataOperations == (numMetadataFiles + 1));
 
+        /* 5B-1: setAttributes and setXattr on tombstone do NOT touch disk or toggle isDirty */
+        __block BOOL tombstoneAttrDone = NO;
+        [hygieneVol setAttributes:dummyReq onItem:dsStoreItem replyHandler:^(FSItemAttributes * _Nullable attributes, NSError * _Nullable error) {
+            (void)attributes;
+            assert(error == nil);
+            tombstoneAttrDone = YES;
+        }];
+        assert(tombstoneAttrDone);
+        assert(dsStoreItem.allocatedSize == 0);
+        assert(dsStoreItem.diskOffset == 0);
+        assert(hygieneVol.isDirty == NO);
+
+        FSFileName *tombstoneXattrName = [[FSFileName alloc] initWithString:@"com.apple.FinderInfo"];
+        NSData *tombstoneXattrVal = [@"finder_flags" dataUsingEncoding:NSUTF8StringEncoding];
+        __block BOOL tombstoneXattrDone = NO;
+        [hygieneVol setXattrNamed:tombstoneXattrName toData:tombstoneXattrVal onItem:dsStoreItem policy:FSSetXattrPolicyAlwaysSet replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+            tombstoneXattrDone = YES;
+        }];
+        assert(tombstoneXattrDone);
+        assert(hygieneVol.isDirty == NO);
+
         /* 5C: Directory enumeration excludes all suppressed metadata */
         MockDirectoryEntryPacker *hygienePacker = [[MockDirectoryEntryPacker alloc] init];
         __block BOOL hygieneEnumDone = NO;
@@ -929,6 +951,45 @@ int main(void) {
             blakeAdsVerified = YES;
         }];
         assert(blakeAdsVerified);
+
+        /* 7B: Truncation clears stale ADS hash streams */
+        [itemAudit truncateToSize:1024];
+        assert(itemAudit.sha256Hex == nil);
+        assert(itemAudit.blake3Hex == nil);
+        __block BOOL staleShaCleared = NO;
+        [cryptoVol getXattrNamed:adsShaName ofItem:itemAudit replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            (void)value;
+            assert(error != nil);
+            assert(error.code == ENOATTR);
+            staleShaCleared = YES;
+        }];
+        assert(staleShaCleared);
+
+        /* 7C: Segmented/append write recomputes new hash from disk via streaming */
+        uint8_t appendChunk[512];
+        memset(appendChunk, 0xEE, sizeof(appendChunk));
+        NSData *appendData = [NSData dataWithBytes:appendChunk length:sizeof(appendChunk)];
+        __block BOOL appendDone = NO;
+        [cryptoVol writeContents:appendData toFile:itemAudit atOffset:1024 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(appendChunk));
+            appendDone = YES;
+        }];
+        assert(appendDone);
+        assert(itemAudit.size == 1536);
+        assert(itemAudit.sha256Hex != nil);
+        assert(itemAudit.blake3Hex != nil);
+
+        /* Verify recomputed hash matches new content */
+        __block BOOL recomputedShaVerified = NO;
+        [cryptoVol getXattrNamed:adsShaName ofItem:itemAudit replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(value != nil);
+            NSString *valStr = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+            assert([valStr isEqualToString:itemAudit.sha256Hex]);
+            recomputedShaVerified = YES;
+        }];
+        assert(recomputedShaVerified);
 
         [cryptoVol cleanup];
         printf("PASS\n");
