@@ -34,8 +34,12 @@
         return;
     }
 
-    /* Valid NTFS volume identified */
-    NSUUID *uuid = [NSUUID UUID];
+    /* Valid NTFS volume identified; derive container UUID deterministically from volume serial */
+    u64 serial = sle64_to_cpu(bs->volume_serial_number);
+    unsigned char uuidBytes[16] = {0};
+    memcpy(uuidBytes, &serial, sizeof(serial));
+    memcpy(uuidBytes + 8, &serial, sizeof(serial));
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDBytes:uuidBytes];
     FSContainerIdentifier *containerID = [[FSContainerIdentifier alloc] initWithUUID:uuid];
     NSString *volumeName = @"NTFS Volume";
 

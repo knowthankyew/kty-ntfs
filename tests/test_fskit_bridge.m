@@ -106,6 +106,28 @@
 }
 @end
 
+/* Mock directory entry packer for enumeration unit tests */
+@interface MockDirectoryEntryPacker : NSObject
+@property (nonatomic, assign) NSUInteger packedCount;
+- (BOOL)packEntryWithName:(FSFileName *)name
+                 itemType:(FSItemType)itemType
+                   itemID:(FSItemID)itemID
+               nextCookie:(FSDirectoryCookie)nextCookie
+               attributes:(FSItemAttributes *)attributes;
+@end
+
+@implementation MockDirectoryEntryPacker
+- (BOOL)packEntryWithName:(FSFileName *)name
+                 itemType:(FSItemType)itemType
+                   itemID:(FSItemID)itemID
+               nextCookie:(FSDirectoryCookie)nextCookie
+               attributes:(FSItemAttributes *)attributes {
+    (void)name; (void)itemType; (void)itemID; (void)nextCookie; (void)attributes;
+    self.packedCount++;
+    return YES;
+}
+@end
+
 static void format_mock_ntfs_boot_sector(MockFSBlockResource *res) {
     uint8_t *bytes = (uint8_t *)[res.storage mutableBytes];
     memset(bytes, 0, MOCK_DISK_SIZE);
@@ -205,6 +227,38 @@ int main(void) {
         }];
         assert(readFinished);
 
+        /* Test defensive readFromFile with 0 length / empty buffer */
+        MockFileDataBuffer *emptyBuf = [[MockFileDataBuffer alloc] initWithLength:0];
+        __block BOOL zeroReadFinished = NO;
+        [volume readFromFile:root offset:0 length:0 intoBuffer:(FSMutableFileDataBuffer *)emptyBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable err) {
+            assert(err == nil);
+            assert(actuallyRead == 0);
+            zeroReadFinished = YES;
+        }];
+        assert(zeroReadFinished);
+
+        /* Test directory enumeration with initial cookie */
+        MockDirectoryEntryPacker *packer1 = [[MockDirectoryEntryPacker alloc] init];
+        __block BOOL enumFinished1 = NO;
+        [volume enumerateDirectory:root startingAtCookie:FSDirectoryCookieInitial verifier:0 providingAttributes:nil usingPacker:(FSDirectoryEntryPacker *)packer1 replyHandler:^(FSDirectoryVerifier currentVerifier, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(currentVerifier > 0);
+            enumFinished1 = YES;
+        }];
+        assert(enumFinished1);
+        assert(packer1.packedCount == 2); /* "." and ".." */
+
+        /* Test directory enumeration with subsequent cookie (EOF) */
+        MockDirectoryEntryPacker *packer2 = [[MockDirectoryEntryPacker alloc] init];
+        __block BOOL enumFinished2 = NO;
+        [volume enumerateDirectory:root startingAtCookie:2 verifier:1 providingAttributes:nil usingPacker:(FSDirectoryEntryPacker *)packer2 replyHandler:^(FSDirectoryVerifier currentVerifier, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(currentVerifier == 1);
+            enumFinished2 = YES;
+        }];
+        assert(enumFinished2);
+        assert(packer2.packedCount == 0); /* EOF, 0 entries packed */
+
         /* Test synchronize */
         __block BOOL synced = NO;
         [volume synchronizeWithFlags:0 replyHandler:^(NSError * _Nullable err) {
@@ -213,6 +267,8 @@ int main(void) {
         }];
         assert(synced);
 
+        /* Test idempotent cleanup under @synchronized */
+        [volume cleanup];
         [volume cleanup];
 
         /* Test read-only volume write rejection */
@@ -254,13 +310,25 @@ int main(void) {
         }];
         assert(probeFinished == YES);
 
-        /* Probe 3C: Valid NTFS boot sector recognized and usable */
+        /* Probe 3C: Valid NTFS boot sector recognized with deterministic container UUID */
+        __block NSUUID *uuid1 = nil;
         probeFinished = NO;
         [fs probeResource:(FSBlockDeviceResource *)mockRes replyHandler:^(FSProbeResult * _Nullable result, NSError * _Nullable error) {
             assert(error == nil);
             assert(result.result == FSMatchResultUsable);
             assert([result.name isEqualToString:@"NTFS Volume"]);
             assert(result.containerID != nil);
+            uuid1 = result.containerID.uuid;
+            probeFinished = YES;
+        }];
+        assert(probeFinished == YES);
+
+        /* Probe 3D: Subsequent probe produces identical deterministic container UUID */
+        probeFinished = NO;
+        [fs probeResource:(FSBlockDeviceResource *)mockRes replyHandler:^(FSProbeResult * _Nullable result, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(result.result == FSMatchResultUsable);
+            assert([result.containerID.uuid isEqual:uuid1]);
             probeFinished = YES;
         }];
         assert(probeFinished == YES);

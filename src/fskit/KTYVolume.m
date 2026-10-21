@@ -72,14 +72,16 @@ static int kty_fskit_sync_cb(void *ctx) {
 }
 
 - (void)cleanup {
-    if (_ntfsDevice) {
-        if (_ntfsDevice->d_ops && NDevOpen(_ntfsDevice)) {
-            _ntfsDevice->d_ops->close(_ntfsDevice);
+    @synchronized (self) {
+        if (_ntfsDevice) {
+            if (_ntfsDevice->d_ops && NDevOpen(_ntfsDevice)) {
+                _ntfsDevice->d_ops->close(_ntfsDevice);
+            }
+            kty_device_free(_ntfsDevice);
+            _ntfsDevice = NULL;
         }
-        kty_device_free(_ntfsDevice);
-        _ntfsDevice = NULL;
+        _isMounted = NO;
     }
-    _isMounted = NO;
 }
 
 - (void)dealloc {
@@ -163,6 +165,10 @@ static int kty_fskit_sync_cb(void *ctx) {
     if (self.ntfsDevice->d_ops && self.ntfsDevice->d_ops->open(self.ntfsDevice, flags) != 0) {
         reply([NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil]);
         return;
+    }
+
+    if (NDevReadOnly(self.ntfsDevice)) {
+        self.readOnly = YES;
     }
 
     self.isMounted = YES;
@@ -329,14 +335,16 @@ static int kty_fskit_sync_cb(void *ctx) {
     (void)verifier;
     (void)attributes;
 
-    /* Pack standard directory entries */
-    FSFileName *dotName = [[FSFileName alloc] initWithCString:"."];
-    [packer packEntryWithName:dotName itemType:FSItemTypeDirectory itemID:FSItemIDRootDirectory nextCookie:1 attributes:nil];
+    /* Only pack entries if starting from initial cookie; subsequent cookies indicate EOF */
+    if (cookie == FSDirectoryCookieInitial) {
+        FSFileName *dotName = [[FSFileName alloc] initWithCString:"."];
+        if ([packer packEntryWithName:dotName itemType:FSItemTypeDirectory itemID:FSItemIDRootDirectory nextCookie:1 attributes:nil]) {
+            FSFileName *dotDotName = [[FSFileName alloc] initWithCString:".."];
+            [packer packEntryWithName:dotDotName itemType:FSItemTypeDirectory itemID:FSItemIDParentOfRoot nextCookie:2 attributes:nil];
+        }
+    }
 
-    FSFileName *dotDotName = [[FSFileName alloc] initWithCString:".."];
-    [packer packEntryWithName:dotDotName itemType:FSItemTypeDirectory itemID:FSItemIDParentOfRoot nextCookie:2 attributes:nil];
-
-    reply(verifier, nil);
+    reply(verifier ?: 1, nil);
 }
 
 #pragma mark - FSVolumeReadWriteOperations
@@ -348,6 +356,11 @@ static int kty_fskit_sync_cb(void *ctx) {
        replyHandler:(void(^)(size_t actuallyRead,
                              NSError * _Nullable error))reply {
     (void)item;
+    if (!buffer || buffer.length == 0 || length == 0) {
+        reply(0, nil);
+        return;
+    }
+
     if (!self.ntfsDevice || !self.ntfsDevice->d_ops) {
         reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil]);
         return;
