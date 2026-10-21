@@ -26,7 +26,7 @@
 static int kty_io_fsync(int fd) {
 #if defined(__APPLE__) || defined(__DARWIN__)
 #ifdef F_FULLFSYNC
-    int ret = fcntl(fd, F_FULLFSYNC, NULL);
+    int ret = fcntl(fd, F_FULLFSYNC, 0);
     if (ret == 0) {
         return 0;
     }
@@ -50,11 +50,11 @@ static int kty_op_open(struct ntfs_device *dev, int flags) {
     if (chan->mode == KTY_IO_MODE_POSIX) {
         struct stat st;
         if (stat(dev->d_name, &st) != 0) {
-            ntfs_log_perror("kty_io: Failed to stat device '%s'", dev->d_name);
+            ntfs_log_perror("kty_io: Failed to access '%s'", dev->d_name);
             return -1;
         }
 
-        if (S_ISBLK(st.st_mode)) {
+        if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
             NDevSetBlock(dev);
         }
 
@@ -78,7 +78,7 @@ static int kty_op_open(struct ntfs_device *dev, int flags) {
         }
 
         /* Determine total size and sector size */
-        if (S_ISBLK(st.st_mode)) {
+        if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
 #if defined(__APPLE__) || defined(__DARWIN__)
             uint64_t block_count = 0;
             uint32_t block_size = 512;
@@ -113,6 +113,7 @@ static int kty_op_open(struct ntfs_device *dev, int flags) {
         }
     }
 
+    chan->pos = 0;
     NDevSetOpen(dev);
     return 0;
 }
@@ -161,10 +162,20 @@ static s64 kty_op_seek(struct ntfs_device *dev, s64 offset, int whence) {
         return (s64)lseek(chan->fd, (off_t)offset, whence);
     }
 
-    /* Resource callbacks do not maintain a stateful cursor; return current/requested offset */
-    if (whence == SEEK_SET) {
-        return offset;
+    if (chan->mode == KTY_IO_MODE_RESOURCE) {
+        if (whence == SEEK_SET) {
+            chan->pos = offset;
+        } else if (whence == SEEK_CUR) {
+            chan->pos += offset;
+        } else if (whence == SEEK_END) {
+            chan->pos = chan->total_bytes + offset;
+        } else {
+            errno = EINVAL;
+            return -1;
+        }
+        return chan->pos;
     }
+
     errno = ENOTSUP;
     return -1;
 }
@@ -178,6 +189,18 @@ static s64 kty_op_read(struct ntfs_device *dev, void *buf, s64 count) {
     kty_io_channel_t *chan = KTY_CHANNEL(dev);
     if (chan->mode == KTY_IO_MODE_POSIX) {
         return (s64)read(chan->fd, buf, (size_t)count);
+    }
+
+    if (chan->mode == KTY_IO_MODE_RESOURCE) {
+        if (!chan->read_cb) {
+            errno = EINVAL;
+            return -1;
+        }
+        s64 res = chan->read_cb(chan->resource_ctx, buf, count, chan->pos);
+        if (res > 0) {
+            chan->pos += res;
+        }
+        return res;
     }
 
     errno = ENOTSUP;
@@ -199,6 +222,19 @@ static s64 kty_op_write(struct ntfs_device *dev, const void *buf, s64 count) {
     if (chan->mode == KTY_IO_MODE_POSIX) {
         s64 written = (s64)write(chan->fd, buf, (size_t)count);
         if (written > 0) {
+            NDevSetDirty(dev);
+        }
+        return written;
+    }
+
+    if (chan->mode == KTY_IO_MODE_RESOURCE) {
+        if (!chan->write_cb) {
+            errno = EROFS;
+            return -1;
+        }
+        s64 written = chan->write_cb(chan->resource_ctx, buf, count, chan->pos);
+        if (written > 0) {
+            chan->pos += written;
             NDevSetDirty(dev);
         }
         return written;
@@ -427,6 +463,18 @@ struct ntfs_device *kty_device_alloc_resource(
     }
 
     return dev;
+}
+
+int kty_device_free(struct ntfs_device *dev) {
+    if (!dev) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (dev->d_private) {
+        free(dev->d_private);
+        dev->d_private = NULL;
+    }
+    return ntfs_device_free(dev);
 }
 
 int kty_device_full_sync(struct ntfs_device *dev) {

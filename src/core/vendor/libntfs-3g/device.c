@@ -159,6 +159,10 @@ int ntfs_device_free(struct ntfs_device *dev)
 		errno = EBUSY;
 		return -1;
 	}
+	if (dev->d_private) {
+		free(dev->d_private);
+		dev->d_private = NULL;
+	}
 	free(dev->d_name);
 	free(dev);
 	return 0;

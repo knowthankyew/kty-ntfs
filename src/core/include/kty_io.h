@@ -32,6 +32,7 @@ typedef struct kty_io_channel {
     s64 total_bytes;
     int sector_size;
     bool read_only;
+    s64 pos;
 } kty_io_channel_t;
 
 /**
@@ -57,6 +58,11 @@ struct ntfs_device *kty_device_alloc_resource(
     int sector_size,
     bool read_only
 );
+
+/**
+ * Safely free an ntfs_device and its private kty_io channel descriptor.
+ */
+int kty_device_free(struct ntfs_device *dev);
 
 /**
  * Flush all pending dirty buffers to the underlying media and issue physical hardware flush.
