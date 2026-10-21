@@ -128,6 +128,22 @@
 }
 @end
 
+/* Mock item set attributes request */
+@interface MockItemSetAttributesRequest : NSObject
+@property (nonatomic, assign) uint32_t mode;
+@property (nonatomic, assign) uint32_t uid;
+@property (nonatomic, assign) uint32_t gid;
+@property (nonatomic, assign) uint64_t size;
+- (BOOL)isValid:(FSItemAttribute)attr;
+@end
+
+@implementation MockItemSetAttributesRequest
+- (BOOL)isValid:(FSItemAttribute)attr {
+    (void)attr;
+    return NO;
+}
+@end
+
 static void format_mock_ntfs_boot_sector(MockFSBlockResource *res) {
     uint8_t *bytes = (uint8_t *)[res.storage mutableBytes];
     memset(bytes, 0, MOCK_DISK_SIZE);
@@ -332,6 +348,177 @@ int main(void) {
             probeFinished = YES;
         }];
         assert(probeFinished == YES);
+        printf("PASS\n");
+
+        /* Test 4: Write Pipeline, Cluster Allocation, Renaming & Journal Sync */
+        printf("[test_fskit_bridge] Test 4: Write pipeline, cluster allocation & journal sync... ");
+        MockFSBlockResource *writeMockRes = [[MockFSBlockResource alloc] init];
+        format_mock_ntfs_boot_sector(writeMockRes);
+
+        FSVolumeIdentifier *writeVolID = [[FSVolumeIdentifier alloc] initWithUUID:[NSUUID UUID]];
+        FSFileName *writeVolName = [[FSFileName alloc] initWithString:@"Write Vol"];
+        KTYVolume *writeVol = [[KTYVolume alloc] initWithResource:(FSBlockDeviceResource *)writeMockRes
+                                                         volumeID:writeVolID
+                                                       volumeName:writeVolName
+                                                         readOnly:NO];
+        assert(writeVol != nil);
+
+        __block BOOL writeVolMounted = NO;
+        [writeVol mountWithOptions:taskOpts replyHandler:^(NSError * _Nullable err) {
+            assert(err == nil);
+            writeVolMounted = YES;
+        }];
+        assert(writeVolMounted);
+
+        /* 4A: File creation */
+        FSItemSetAttributesRequest *dummyReq = (FSItemSetAttributesRequest *)[[MockItemSetAttributesRequest alloc] init];
+        FSFileName *testFile = [[FSFileName alloc] initWithCString:"evidence_sample.bin"];
+        __block KTYItem *createdItem = nil;
+        __block BOOL createFinished = NO;
+        [writeVol createItemNamed:testFile type:FSItemTypeFile inDirectory:writeVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(newItem != nil);
+            assert([newItemName.string isEqualToString:@"evidence_sample.bin"]);
+            createdItem = (KTYItem *)newItem;
+            createFinished = YES;
+        }];
+        assert(createFinished);
+        assert(createdItem.itemID >= 1000);
+        assert(createdItem.size == 0);
+        assert(createdItem.allocatedSize == 4096);
+        assert(createdItem.diskOffset >= 32768);
+
+        /* 4B: Rejection of duplicate file name */
+        __block BOOL duplicateRejected = NO;
+        [writeVol createItemNamed:testFile type:FSItemTypeFile inDirectory:writeVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItem;
+            (void)newItemName;
+            assert(error != nil);
+            assert(error.code == EEXIST);
+            duplicateRejected = YES;
+        }];
+        assert(duplicateRejected);
+
+        /* 4C: Write payload with sector-aligned cluster growth */
+        uint8_t payload[8192];
+        for (size_t i = 0; i < sizeof(payload); i++) {
+            payload[i] = (uint8_t)(i & 0xFF);
+        }
+        NSData *payloadData = [NSData dataWithBytes:payload length:sizeof(payload)];
+        __block BOOL payloadWriteFinished = NO;
+        [writeVol writeContents:payloadData toFile:createdItem atOffset:0 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(payload));
+            payloadWriteFinished = YES;
+        }];
+        assert(payloadWriteFinished);
+        assert(createdItem.size == sizeof(payload));
+        assert(createdItem.allocatedSize >= sizeof(payload));
+        assert(writeVol.isDirty == YES);
+        assert(writeVol.totalBytesWritten == sizeof(payload));
+        assert(writeVol.activeTransactions > 0);
+
+        /* 4D: Bit-for-bit readback from allocated disk clusters */
+        MockFileDataBuffer *readPayloadBuf = [[MockFileDataBuffer alloc] initWithLength:sizeof(payload)];
+        __block BOOL payloadReadFinished = NO;
+        [writeVol readFromFile:createdItem offset:0 length:sizeof(payload) intoBuffer:(FSMutableFileDataBuffer *)readPayloadBuf replyHandler:^(size_t actuallyRead, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyRead == sizeof(payload));
+            payloadReadFinished = YES;
+        }];
+        assert(payloadReadFinished);
+        assert(memcmp([readPayloadBuf mutableBytes], payload, sizeof(payload)) == 0);
+
+        /* 4E: Directory lookup of newly created file */
+        __block BOOL lookupFinished = NO;
+        [writeVol lookupItemNamed:testFile inDirectory:writeVol.rootItem replyHandler:^(FSItem * _Nullable theItem, FSFileName * _Nullable itemName, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(theItem != nil);
+            assert([(KTYItem *)theItem itemID] == createdItem.itemID);
+            assert([itemName.string isEqualToString:@"evidence_sample.bin"]);
+            lookupFinished = YES;
+        }];
+        assert(lookupFinished);
+
+        /* 4F: Directory enumeration includes created child */
+        MockDirectoryEntryPacker *childPacker = [[MockDirectoryEntryPacker alloc] init];
+        __block BOOL childEnumFinished = NO;
+        [writeVol enumerateDirectory:writeVol.rootItem startingAtCookie:FSDirectoryCookieInitial verifier:0 providingAttributes:nil usingPacker:(FSDirectoryEntryPacker *)childPacker replyHandler:^(FSDirectoryVerifier currentVerifier, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(currentVerifier > 0);
+            childEnumFinished = YES;
+        }];
+        assert(childEnumFinished);
+        assert(childPacker.packedCount == 3); /* "." and ".." and "evidence_sample.bin" */
+
+        /* 4G: File truncation / resizing */
+        [createdItem truncateToSize:4096];
+        assert(createdItem.size == 4096);
+        assert(createdItem.allocatedSize == 4096);
+
+        /* 4H: File renaming */
+        FSFileName *renamedFile = [[FSFileName alloc] initWithCString:"evidence_sample_archived.bin"];
+        __block BOOL renameFinished = NO;
+        [writeVol renameItem:createdItem inDirectory:writeVol.rootItem named:testFile toNewName:renamedFile inDirectory:writeVol.rootItem overItem:nil replyHandler:^(FSFileName * _Nullable newName, NSError * _Nullable error) {
+            assert(error == nil);
+            assert([newName.string isEqualToString:@"evidence_sample_archived.bin"]);
+            renameFinished = YES;
+        }];
+        assert(renameFinished);
+
+        /* Lookup old name fails */
+        __block BOOL oldLookupFailed = NO;
+        [writeVol lookupItemNamed:testFile inDirectory:writeVol.rootItem replyHandler:^(FSItem * _Nullable theItem, FSFileName * _Nullable itemName, NSError * _Nullable error) {
+            (void)theItem;
+            (void)itemName;
+            assert(error != nil);
+            assert(error.code == ENOENT);
+            oldLookupFailed = YES;
+        }];
+        assert(oldLookupFailed);
+
+        /* Lookup new name succeeds */
+        __block BOOL newLookupSucceeded = NO;
+        [writeVol lookupItemNamed:renamedFile inDirectory:writeVol.rootItem replyHandler:^(FSItem * _Nullable theItem, FSFileName * _Nullable itemName, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(theItem != nil);
+            assert([(KTYItem *)theItem itemID] == createdItem.itemID);
+            assert([itemName.string isEqualToString:@"evidence_sample_archived.bin"]);
+            newLookupSucceeded = YES;
+        }];
+        assert(newLookupSucceeded);
+
+        /* 4I: File deletion */
+        __block BOOL removeFinished = NO;
+        [writeVol removeItem:createdItem named:renamedFile fromDirectory:writeVol.rootItem replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+            removeFinished = YES;
+        }];
+        assert(removeFinished);
+
+        /* Lookup after removal fails */
+        __block BOOL postRemoveLookupFailed = NO;
+        [writeVol lookupItemNamed:renamedFile inDirectory:writeVol.rootItem replyHandler:^(FSItem * _Nullable theItem, FSFileName * _Nullable itemName, NSError * _Nullable error) {
+            (void)theItem;
+            (void)itemName;
+            assert(error != nil);
+            assert(error.code == ENOENT);
+            postRemoveLookupFailed = YES;
+        }];
+        assert(postRemoveLookupFailed);
+
+        /* 4J: Journal sync & clean teardown */
+        __block BOOL writeSyncFinished = NO;
+        [writeVol synchronizeWithFlags:0 replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+            writeSyncFinished = YES;
+        }];
+        assert(writeSyncFinished);
+        assert(writeVol.isDirty == NO);
+        assert(writeVol.activeTransactions == 0);
+
+        [writeVol cleanup];
+        assert(writeVol.isMounted == NO);
         printf("PASS\n");
 
         printf("[test_fskit_bridge] All FSKit extension bridge tests passed successfully!\n");

@@ -13,8 +13,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) FSBlockDeviceResource *blockResource;
 @property (nonatomic, readonly, nullable) struct ntfs_device *ntfsDevice;
+@property (nonatomic, strong, readonly) KTYItem *rootItem;
 @property (nonatomic, assign) BOOL isMounted;
 @property (nonatomic, assign) BOOL readOnly;
+@property (nonatomic, assign, readonly) BOOL isDirty;
+@property (nonatomic, assign, readonly) uint64_t totalBytesWritten;
+@property (nonatomic, assign, readonly) uint32_t activeTransactions;
 
 - (instancetype)initWithResource:(FSBlockDeviceResource *)resource
                         volumeID:(FSVolumeIdentifier *)volumeID
