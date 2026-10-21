@@ -27,10 +27,10 @@ LIB_DIR = $(BUILD_DIR)/lib
 OBJ_DIR = $(BUILD_DIR)/obj
 
 CORE_VENDOR_SRCS = $(wildcard src/core/vendor/libntfs-3g/*.c)
-CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c
+CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c src/core/kty_crypto.c
 
-CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o
-CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o
+CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o $(OBJ_DIR)/arm64/kty_crypto.o
+CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o $(OBJ_DIR)/x86_64/kty_crypto.o
 
 FSKIT_SRCS = src/fskit/KTYItem.m src/fskit/KTYVolume.m src/fskit/KTYUnaryFileSystem.m
 FSKIT_OBJS_ARM64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/arm64/fskit/%.o,$(FSKIT_SRCS))
@@ -57,7 +57,15 @@ $(OBJ_DIR)/arm64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/arm64/vendor
 	@echo "==> Compiling arm64: $<"
 	$(CC) $(CFLAGS_ARM64) -c $< -o $@
 
+$(OBJ_DIR)/arm64/kty_crypto.o: src/core/kty_crypto.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64: $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
 $(OBJ_DIR)/x86_64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64: $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/kty_crypto.o: src/core/kty_crypto.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 

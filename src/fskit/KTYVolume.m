@@ -47,6 +47,7 @@ static int kty_fskit_sync_cb(void *ctx) {
 @property (nonatomic, assign) BOOL isDirty;
 @property (nonatomic, assign) uint64_t totalBytesWritten;
 @property (nonatomic, assign) uint32_t activeTransactions;
+@property (nonatomic, assign) uint64_t suppressedMetadataOperations;
 @end
 
 @implementation KTYVolume
@@ -59,6 +60,8 @@ static int kty_fskit_sync_cb(void *ctx) {
     if (self) {
         _blockResource = resource;
         _readOnly = readOnly;
+        _allowSystemMetadata = NO;
+        _suppressedMetadataOperations = 0;
         _isMounted = NO;
         _rootItem = [KTYItem rootDirectoryItem];
         _nextItemID = 1000;
@@ -224,8 +227,15 @@ static int kty_fskit_sync_cb(void *ctx) {
 
 - (void)mountWithOptions:(FSTaskOptions *)options
            replyHandler:(void(^)(NSError * _Nullable error))reply {
-    (void)options;
     @synchronized (self) {
+        if (options && [options.description containsString:@"allow-system-metadata"]) {
+            self.allowSystemMetadata = YES;
+        }
+
+        if (self.allowSystemMetadata) {
+            fprintf(stderr, "[kty-ntfs forensic policy] WARNING: --allow-system-metadata is ENABLED. Host system metadata (.DS_Store, Spotlight, Trashes) is permitted. Volume is NOT forensically clean.\n");
+        }
+
         if (!self.ntfsDevice) {
             reply([NSError errorWithDomain:NSPOSIXErrorDomain code:EIO userInfo:nil]);
             return;
@@ -398,6 +408,32 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
+        /* Forensic Hygiene: Intercept and silently drop host system metadata */
+        if ([KTYItem isSystemMetadataName:name.string]) {
+            if (!self.allowSystemMetadata) {
+                _suppressedMetadataOperations++;
+                FSItemID itemID = (FSItemID)self.nextItemID++;
+                NSString *childPath = [parentDir.path isEqualToString:@"/"] 
+                    ? [NSString stringWithFormat:@"/%@", name.string]
+                    : [NSString stringWithFormat:@"%@/%@", parentDir.path, name.string];
+                uint32_t mode = (type == FSItemTypeDirectory) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+                KTYItem *tombstone = [KTYItem itemWithID:itemID
+                                                   name:name.string
+                                                   path:childPath
+                                                   type:type
+                                                   size:0
+                                                   mode:mode];
+                tombstone.isForensicTombstone = YES;
+                tombstone.diskOffset = 0;
+                tombstone.allocatedSize = 0;
+                [parentDir addChild:tombstone];
+                reply(tombstone, name, nil);
+                return;
+            } else {
+                fprintf(stderr, "[kty-ntfs forensic policy] WARNING: Host system metadata modification allowed for '%s'. Volume is NOT forensically clean!\n", name.string.UTF8String);
+            }
+        }
+
         FSItemID itemID = (FSItemID)self.nextItemID++;
         NSString *childPath = [parentDir.path isEqualToString:@"/"] 
             ? [NSString stringWithFormat:@"/%@", name.string]
@@ -492,6 +528,13 @@ static int kty_fskit_sync_cb(void *ctx) {
         KTYItem *targetItem = [parentDir childNamed:name.string];
         if (!targetItem) {
             reply([NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:nil]);
+            return;
+        }
+
+        if (targetItem.isForensicTombstone) {
+            _suppressedMetadataOperations++;
+            [parentDir removeChildNamed:name.string];
+            reply(nil);
             return;
         }
 
@@ -615,6 +658,10 @@ static int kty_fskit_sync_cb(void *ctx) {
                 NSUInteger idx = 0;
                 for (NSString *childName in targetDir.children) {
                     KTYItem *child = targetDir.children[childName];
+                    if (child.isForensicTombstone) {
+                        /* Silently exclude intercepted system metadata from directory listing */
+                        continue;
+                    }
                     FSFileName *fn = [[FSFileName alloc] initWithString:child.name];
                     FSDirectoryCookie nextCookie = (FSDirectoryCookie)(idx + 3);
                     [packer packEntryWithName:fn itemType:child.itemType itemID:child.itemID nextCookie:nextCookie attributes:nil];
@@ -656,6 +703,10 @@ static int kty_fskit_sync_cb(void *ctx) {
 
         if (item && [item isKindOfClass:[KTYItem class]]) {
             KTYItem *ktyItem = (KTYItem *)item;
+            if (ktyItem.isForensicTombstone) {
+                reply(0, nil);
+                return;
+            }
             if (ktyItem.itemType == FSItemTypeFile) {
                 if ((uint64_t)offset >= ktyItem.size) {
                     /* At or past EOF */
@@ -714,6 +765,17 @@ static int kty_fskit_sync_cb(void *ctx) {
             return;
         }
 
+        if (ktyItem.isForensicTombstone) {
+            _suppressedMetadataOperations++;
+            uint64_t endPos = (uint64_t)offset + contents.length;
+            if (endPos > ktyItem.size) {
+                ktyItem.size = endPos;
+            }
+            ktyItem.mtime = time(NULL);
+            reply(contents.length, nil);
+            return;
+        }
+
         uint64_t endPos = (uint64_t)offset + contents.length;
         if (endPos < (uint64_t)offset) {
             reply(0, [NSError errorWithDomain:NSPOSIXErrorDomain code:EFBIG userInfo:nil]);
@@ -754,11 +816,91 @@ static int kty_fskit_sync_cb(void *ctx) {
             }
         }
 
+        /* Update forensic integrity hashes (SHA-256 and BLAKE3) and ADS */
+        [ktyItem updateForensicHashesWithData:contents offset:(uint64_t)offset];
+
         _isDirty = YES;
         _totalBytesWritten += contents.length;
         _activeTransactions++;
 
         reply(contents.length, nil);
+    }
+}
+
+#pragma mark - FSVolumeXattrOperations (NTFS Alternate Data Streams)
+
+- (void)getXattrNamed:(FSFileName *)name
+               ofItem:(FSItem *)item
+         replyHandler:(void (^)(NSData * _Nullable value,
+                                NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!item || ![item isKindOfClass:[KTYItem class]]) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+        if (!name || name.string.length == 0) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
+        KTYItem *ktyItem = (KTYItem *)item;
+        NSData *data = [ktyItem xattrNamed:name.string];
+        if (data) {
+            reply(data, nil);
+        } else {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOATTR userInfo:nil]);
+        }
+    }
+}
+
+- (void)setXattrNamed:(FSFileName *)name
+               toData:(NSData * _Nullable)value
+               onItem:(FSItem *)item
+               policy:(FSSetXattrPolicy)policy
+         replyHandler:(void (^)(NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (self.readOnly) {
+            reply([NSError errorWithDomain:NSPOSIXErrorDomain code:EROFS userInfo:nil]);
+            return;
+        }
+        if (!item || ![item isKindOfClass:[KTYItem class]]) {
+            reply([NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+        if (!name || name.string.length == 0) {
+            reply([NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
+        KTYItem *ktyItem = (KTYItem *)item;
+        NSError *err = nil;
+        BOOL ok = [ktyItem setXattrNamed:name.string data:value policy:policy error:&err];
+        if (ok) {
+            _isDirty = YES;
+            _activeTransactions++;
+            reply(nil);
+        } else {
+            reply(err ?: [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+        }
+    }
+}
+
+- (void)listXattrsOfItem:(FSItem *)item
+            replyHandler:(void (^)(NSArray<FSFileName *> * _Nullable value,
+                                   NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!item || ![item isKindOfClass:[KTYItem class]]) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:nil]);
+            return;
+        }
+
+        KTYItem *ktyItem = (KTYItem *)item;
+        NSArray<NSString *> *names = [ktyItem listXattrNames];
+        NSMutableArray<FSFileName *> *fileNames = [NSMutableArray arrayWithCapacity:names.count];
+        for (NSString *str in names) {
+            [fileNames addObject:[[FSFileName alloc] initWithString:str]];
+        }
+        reply(fileNames, nil);
     }
 }
 

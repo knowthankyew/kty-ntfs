@@ -11,6 +11,7 @@
 #include <fcntl.h>
 
 #include "kty_io.h"
+#include "kty_crypto.h"
 #include "ntfs-3g/types.h"
 #include "ntfs-3g/layout.h"
 #include "ntfs-3g/bootsect.h"
@@ -228,6 +229,46 @@ int main(void) {
     assert(memcmp(read_buf, posix_payload, (size_t)p_len) == 0);
     close(check_fd);
     unlink(temp_path);
+    printf("PASS\n");
+
+    /* Test 5: Cryptographic chain-of-custody hashing (SHA-256 and BLAKE3) */
+    printf("[test_ntfs_core] Test 5: Cryptographic hashing (SHA-256 & BLAKE3)... ");
+    uint8_t digest[32];
+    char hex[65];
+
+    /* SHA-256 empty */
+    kty_sha256_data("", 0, digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+
+    /* SHA-256 "abc" */
+    kty_sha256_data("abc", 3, digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
+
+    /* BLAKE3 empty */
+    kty_blake3_data("", 0, digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262") == 0);
+
+    /* BLAKE3 "abc" */
+    kty_blake3_data("abc", 3, digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85") == 0);
+
+    /* BLAKE3 1025 bytes tree boundary */
+    uint8_t buf1025[1025];
+    for (size_t i = 0; i < sizeof(buf1025); i++) buf1025[i] = (uint8_t)(i % 251);
+    kty_blake3_data(buf1025, sizeof(buf1025), digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444") == 0);
+
+    /* BLAKE3 2048 bytes multi-chunk */
+    uint8_t buf2048[2048];
+    for (size_t i = 0; i < sizeof(buf2048); i++) buf2048[i] = (uint8_t)(i % 251);
+    kty_blake3_data(buf2048, sizeof(buf2048), digest);
+    kty_digest_to_hex(digest, hex);
+    assert(strcmp(hex, "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a") == 0);
     printf("PASS\n");
 
     printf("[test_ntfs_core] All headless NTFS engine tests passed successfully!\n");

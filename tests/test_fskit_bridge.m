@@ -6,6 +6,7 @@
 #import "KTYItem.h"
 #import "KTYVolume.h"
 #import "KTYUnaryFileSystem.h"
+#import "kty_crypto.h"
 
 #ifndef _WINDEF_H
 #define _WINDEF_H
@@ -645,6 +646,291 @@ int main(void) {
 
         [writeVol cleanup];
         assert(writeVol.isMounted == NO);
+        printf("PASS\n");
+
+        /* Test 5: Forensic Hygiene & Path-Based Metadata Filtering */
+        printf("[test_fskit_bridge] Test 5: Forensic hygiene & metadata suppression... ");
+        MockFSBlockResource *hygieneMockRes = [[MockFSBlockResource alloc] init];
+        format_mock_ntfs_boot_sector(hygieneMockRes);
+
+        FSVolumeIdentifier *hygieneVolID = [[FSVolumeIdentifier alloc] initWithUUID:[NSUUID UUID]];
+        FSFileName *hygieneVolName = [[FSFileName alloc] initWithString:@"Hygiene Vol"];
+        KTYVolume *hygieneVol = [[KTYVolume alloc] initWithResource:(FSBlockDeviceResource *)hygieneMockRes
+                                                           volumeID:hygieneVolID
+                                                         volumeName:hygieneVolName
+                                                           readOnly:NO];
+        assert(hygieneVol != nil);
+        assert(hygieneVol.allowSystemMetadata == NO);
+
+        __block BOOL hygieneVolMounted = NO;
+        [hygieneVol mountWithOptions:taskOpts replyHandler:^(NSError * _Nullable err) {
+            assert(err == nil);
+            hygieneVolMounted = YES;
+        }];
+        assert(hygieneVolMounted);
+
+        /* 5A: Interception of .DS_Store, .Spotlight-V100, .Trashes, .fseventsd, and ._* sidecars */
+        const char *metadataFiles[] = {
+            ".DS_Store",
+            ".Spotlight-V100",
+            ".Trashes",
+            ".fseventsd",
+            "._evidence.bin"
+        };
+        size_t numMetadataFiles = sizeof(metadataFiles) / sizeof(metadataFiles[0]);
+
+        for (size_t i = 0; i < numMetadataFiles; i++) {
+            FSFileName *mName = [[FSFileName alloc] initWithCString:metadataFiles[i]];
+            __block BOOL created = NO;
+            [hygieneVol createItemNamed:mName
+                                   type:(i == 1 || i == 2 || i == 3) ? FSItemTypeDirectory : FSItemTypeFile
+                            inDirectory:hygieneVol.rootItem
+                             attributes:dummyReq
+                           replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+                (void)newItemName;
+                assert(error == nil);
+                assert(newItem != nil);
+                KTYItem *ktyNew = (KTYItem *)newItem;
+                assert(ktyNew.isForensicTombstone == YES);
+                assert(ktyNew.diskOffset == 0);
+                assert(ktyNew.allocatedSize == 0);
+                created = YES;
+            }];
+            assert(created);
+        }
+
+        assert(hygieneVol.suppressedMetadataOperations == numMetadataFiles);
+        assert(hygieneVol.totalBytesWritten == 0);
+        assert(hygieneVol.isDirty == NO);
+
+        /* 5B: Writing into tombstone file does NOT touch disk or set dirty bit */
+        KTYItem *dsStoreItem = [hygieneVol.rootItem childNamed:@".DS_Store"];
+        assert(dsStoreItem != nil);
+        assert(dsStoreItem.isForensicTombstone == YES);
+
+        uint8_t dummyMeta[512] = {0};
+        NSData *dummyMetaData = [NSData dataWithBytes:dummyMeta length:sizeof(dummyMeta)];
+        __block BOOL metaWriteDone = NO;
+        [hygieneVol writeContents:dummyMetaData toFile:dsStoreItem atOffset:0 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(dummyMeta));
+            metaWriteDone = YES;
+        }];
+        assert(metaWriteDone);
+        assert(hygieneVol.totalBytesWritten == 0);
+        assert(hygieneVol.isDirty == NO);
+        assert(hygieneVol.suppressedMetadataOperations == (numMetadataFiles + 1));
+
+        /* 5C: Directory enumeration excludes all suppressed metadata */
+        MockDirectoryEntryPacker *hygienePacker = [[MockDirectoryEntryPacker alloc] init];
+        __block BOOL hygieneEnumDone = NO;
+        [hygieneVol enumerateDirectory:hygieneVol.rootItem
+                      startingAtCookie:FSDirectoryCookieInitial
+                              verifier:0
+                   providingAttributes:nil
+                           usingPacker:(FSDirectoryEntryPacker *)hygienePacker
+                          replyHandler:^(FSDirectoryVerifier currentVerifier, NSError * _Nullable error) {
+            (void)currentVerifier;
+            assert(error == nil);
+            hygieneEnumDone = YES;
+        }];
+        assert(hygieneEnumDone);
+        assert(hygienePacker.packedCount == 2); /* Only "." and ".." */
+
+        /* 5D: Override flag allowSystemMetadata allows disk allocation */
+        hygieneVol.allowSystemMetadata = YES;
+        FSFileName *allowedName = [[FSFileName alloc] initWithCString:".DS_Store_allowed"];
+        __block BOOL allowedCreated = NO;
+        [hygieneVol createItemNamed:allowedName
+                               type:FSItemTypeFile
+                        inDirectory:hygieneVol.rootItem
+                         attributes:dummyReq
+                       replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItemName;
+            assert(error == nil);
+            assert(newItem != nil);
+            KTYItem *ktyAllowed = (KTYItem *)newItem;
+            assert(ktyAllowed.isForensicTombstone == NO);
+            assert(ktyAllowed.diskOffset > 0);
+            assert(ktyAllowed.allocatedSize == 4096);
+            allowedCreated = YES;
+        }];
+        assert(allowedCreated);
+        [hygieneVol cleanup];
+        printf("PASS\n");
+
+        /* Test 6: Extended Attributes (xattr) & NTFS Alternate Data Streams (ADS) */
+        printf("[test_fskit_bridge] Test 6: Extended attributes & ADS mapping... ");
+        MockFSBlockResource *xattrMockRes = [[MockFSBlockResource alloc] init];
+        format_mock_ntfs_boot_sector(xattrMockRes);
+
+        FSVolumeIdentifier *xattrVolID = [[FSVolumeIdentifier alloc] initWithUUID:[NSUUID UUID]];
+        FSFileName *xattrVolName = [[FSFileName alloc] initWithString:@"Xattr Vol"];
+        KTYVolume *xattrVol = [[KTYVolume alloc] initWithResource:(FSBlockDeviceResource *)xattrMockRes
+                                                         volumeID:xattrVolID
+                                                       volumeName:xattrVolName
+                                                         readOnly:NO];
+        assert(xattrVol != nil);
+        [xattrVol mountWithOptions:taskOpts replyHandler:^(NSError * _Nullable err) {
+            assert(err == nil);
+        }];
+
+        FSFileName *fnEvidence = [[FSFileName alloc] initWithCString:"evidence_payload.dat"];
+        __block KTYItem *itemEvidence = nil;
+        [xattrVol createItemNamed:fnEvidence type:FSItemTypeFile inDirectory:xattrVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItemName;
+            assert(error == nil);
+            itemEvidence = (KTYItem *)newItem;
+        }];
+        assert(itemEvidence != nil);
+
+        /* 6A: Set xattr with FSSetXattrPolicyMustCreate */
+        FSFileName *xattrQuarantine = [[FSFileName alloc] initWithString:@"com.apple.quarantine"];
+        NSData *quarantineData = [@"0081;66554433;Safari;UUID" dataUsingEncoding:NSUTF8StringEncoding];
+        __block BOOL xattrSetDone = NO;
+        [xattrVol setXattrNamed:xattrQuarantine toData:quarantineData onItem:itemEvidence policy:FSSetXattrPolicyMustCreate replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+            xattrSetDone = YES;
+        }];
+        assert(xattrSetDone);
+        assert(xattrVol.isDirty == YES);
+
+        /* 6B: FSSetXattrPolicyMustCreate on existing attribute fails with EEXIST */
+        __block BOOL xattrDupRejected = NO;
+        [xattrVol setXattrNamed:xattrQuarantine toData:quarantineData onItem:itemEvidence policy:FSSetXattrPolicyMustCreate replyHandler:^(NSError * _Nullable error) {
+            assert(error != nil);
+            assert(error.code == EEXIST);
+            xattrDupRejected = YES;
+        }];
+        assert(xattrDupRejected);
+
+        /* 6C: Read back xattr bit-for-bit */
+        __block BOOL xattrGetDone = NO;
+        [xattrVol getXattrNamed:xattrQuarantine ofItem:itemEvidence replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(value != nil);
+            assert([value isEqualToData:quarantineData]);
+            xattrGetDone = YES;
+        }];
+        assert(xattrGetDone);
+
+        /* 6D: List xattrs */
+        __block BOOL xattrListDone = NO;
+        [xattrVol listXattrsOfItem:itemEvidence replyHandler:^(NSArray<FSFileName *> * _Nullable value, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(value != nil);
+            assert(value.count >= 1);
+            BOOL found = NO;
+            for (FSFileName *fn in value) {
+                if ([fn.string isEqualToString:@"com.apple.quarantine"]) {
+                    found = YES;
+                    break;
+                }
+            }
+            assert(found);
+            xattrListDone = YES;
+        }];
+        assert(xattrListDone);
+
+        /* 6E: Delete xattr with FSSetXattrPolicyDelete */
+        __block BOOL xattrDeleteDone = NO;
+        [xattrVol setXattrNamed:xattrQuarantine toData:nil onItem:itemEvidence policy:FSSetXattrPolicyDelete replyHandler:^(NSError * _Nullable error) {
+            assert(error == nil);
+            xattrDeleteDone = YES;
+        }];
+        assert(xattrDeleteDone);
+
+        /* 6F: Read back deleted xattr fails with ENOATTR */
+        __block BOOL xattrNotFound = NO;
+        [xattrVol getXattrNamed:xattrQuarantine ofItem:itemEvidence replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            (void)value;
+            assert(error != nil);
+            assert(error.code == ENOATTR);
+            xattrNotFound = YES;
+        }];
+        assert(xattrNotFound);
+        [xattrVol cleanup];
+        printf("PASS\n");
+
+        /* Test 7: Cryptographic Chain-of-Custody Hashing & Auto-ADS */
+        printf("[test_fskit_bridge] Test 7: Chain-of-custody cryptographic hashing & auto-ADS... ");
+        MockFSBlockResource *cryptoMockRes = [[MockFSBlockResource alloc] init];
+        format_mock_ntfs_boot_sector(cryptoMockRes);
+
+        FSVolumeIdentifier *cryptoVolID = [[FSVolumeIdentifier alloc] initWithUUID:[NSUUID UUID]];
+        FSFileName *cryptoVolName = [[FSFileName alloc] initWithString:@"Crypto Vol"];
+        KTYVolume *cryptoVol = [[KTYVolume alloc] initWithResource:(FSBlockDeviceResource *)cryptoMockRes
+                                                         volumeID:cryptoVolID
+                                                       volumeName:cryptoVolName
+                                                         readOnly:NO];
+        assert(cryptoVol != nil);
+        [cryptoVol mountWithOptions:taskOpts replyHandler:^(NSError * _Nullable err) {
+            assert(err == nil);
+        }];
+
+        FSFileName *fnAudit = [[FSFileName alloc] initWithCString:"evidence_master.raw"];
+        __block KTYItem *itemAudit = nil;
+        [cryptoVol createItemNamed:fnAudit type:FSItemTypeFile inDirectory:cryptoVol.rootItem attributes:dummyReq replyHandler:^(FSItem * _Nullable newItem, FSFileName * _Nullable newItemName, NSError * _Nullable error) {
+            (void)newItemName;
+            assert(error == nil);
+            itemAudit = (KTYItem *)newItem;
+        }];
+        assert(itemAudit != nil);
+
+        /* Write 4096 bytes with known bytes */
+        uint8_t auditBytes[4096];
+        for (size_t i = 0; i < sizeof(auditBytes); i++) {
+            auditBytes[i] = (uint8_t)(i & 0xFF);
+        }
+        NSData *auditData = [NSData dataWithBytes:auditBytes length:sizeof(auditBytes)];
+
+        /* Compute expected hashes */
+        uint8_t expSha[32], expBlake[32];
+        char expShaHex[65], expBlakeHex[65];
+        kty_sha256_data(auditBytes, sizeof(auditBytes), expSha);
+        kty_digest_to_hex(expSha, expShaHex);
+        kty_blake3_data(auditBytes, sizeof(auditBytes), expBlake);
+        kty_digest_to_hex(expBlake, expBlakeHex);
+        NSString *expShaHexStr = [NSString stringWithUTF8String:expShaHex];
+        NSString *expBlakeHexStr = [NSString stringWithUTF8String:expBlakeHex];
+
+        __block BOOL auditWriteDone = NO;
+        [cryptoVol writeContents:auditData toFile:itemAudit atOffset:0 replyHandler:^(size_t actuallyWritten, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(actuallyWritten == sizeof(auditBytes));
+            auditWriteDone = YES;
+        }];
+        assert(auditWriteDone);
+
+        /* Verify hashes updated on item */
+        assert([itemAudit.sha256Hex isEqualToString:expShaHexStr]);
+        assert([itemAudit.blake3Hex isEqualToString:expBlakeHexStr]);
+
+        /* Verify Alternate Data Streams automatically populated for chain-of-custody */
+        FSFileName *adsShaName = [[FSFileName alloc] initWithString:@"kty.integrity.sha256"];
+        FSFileName *adsBlakeName = [[FSFileName alloc] initWithString:@"kty.integrity.blake3"];
+
+        __block BOOL shaAdsVerified = NO;
+        [cryptoVol getXattrNamed:adsShaName ofItem:itemAudit replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(value != nil);
+            NSString *valStr = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+            assert([valStr isEqualToString:expShaHexStr]);
+            shaAdsVerified = YES;
+        }];
+        assert(shaAdsVerified);
+
+        __block BOOL blakeAdsVerified = NO;
+        [cryptoVol getXattrNamed:adsBlakeName ofItem:itemAudit replyHandler:^(NSData * _Nullable value, NSError * _Nullable error) {
+            assert(error == nil);
+            assert(value != nil);
+            NSString *valStr = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+            assert([valStr isEqualToString:expBlakeHexStr]);
+            blakeAdsVerified = YES;
+        }];
+        assert(blakeAdsVerified);
+
+        [cryptoVol cleanup];
         printf("PASS\n");
 
         printf("[test_fskit_bridge] All FSKit extension bridge tests passed successfully!\n");
