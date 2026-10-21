@@ -15,6 +15,12 @@ CFLAGS_COMMON = -isysroot $(SDKROOT) -Wall -Wextra -O2 -fstack-protector-strong 
 CFLAGS_ARM64 = $(CFLAGS_COMMON) -target arm64-apple-macos$(TARGET_OS_MIN)
 CFLAGS_X86_64 = $(CFLAGS_COMMON) -target x86_64-apple-macos$(TARGET_OS_MIN)
 
+OBJCFLAGS_COMMON = $(CFLAGS_COMMON) -fobjc-arc -Wno-unguarded-availability-new -Isrc/fskit
+OBJCFLAGS_ARM64 = $(OBJCFLAGS_COMMON) -target arm64-apple-macos$(TARGET_OS_MIN)
+OBJCFLAGS_X86_64 = $(OBJCFLAGS_COMMON) -target x86_64-apple-macos$(TARGET_OS_MIN)
+
+FSKIT_FRAMEWORKS = -framework Foundation -framework FSKit
+
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
 LIB_DIR = $(BUILD_DIR)/lib
@@ -26,11 +32,15 @@ CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c
 CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o
 CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o
 
-.PHONY: all clean core smoke_test test_ntfs_core test verify-invariants audit-claims asan
+FSKIT_SRCS = src/fskit/KTYItem.m src/fskit/KTYVolume.m src/fskit/KTYUnaryFileSystem.m
+FSKIT_OBJS_ARM64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/arm64/fskit/%.o,$(FSKIT_SRCS))
+FSKIT_OBJS_X86_64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/x86_64/fskit/%.o,$(FSKIT_SRCS))
 
-all: core smoke_test test_ntfs_core
+.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge test verify-invariants audit-claims asan
 
-$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor:
+all: core smoke_test test_ntfs_core fskit test_fskit_bridge
+
+$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit:
 	@mkdir -p $@
 
 # --- Core Static Library Compilation ---
@@ -121,13 +131,73 @@ test_ntfs_core: $(BIN_DIR)/test_ntfs_core
 	@echo "==> Executing NTFS Core test suite:"
 	./$(BIN_DIR)/test_ntfs_core
 
+# --- Phase 2 FSKit App Extension & Bridge Tests ---
+
+$(OBJ_DIR)/arm64/fskit/%.o: src/fskit/%.m | $(OBJ_DIR)/arm64/fskit
+	@echo "==> Compiling arm64 (fskit): $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/fskit/%.o: src/fskit/%.m | $(OBJ_DIR)/x86_64/fskit
+	@echo "==> Compiling x86_64 (fskit): $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/kty-ntfs-fs_arm64: $(OBJ_DIR)/arm64/fskit/main.o $(FSKIT_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 FSKit executable: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs-fs_x86_64: $(OBJ_DIR)/x86_64/fskit/main.o $(FSKIT_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 FSKit executable: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs-fs: $(BIN_DIR)/kty-ntfs-fs_arm64 $(BIN_DIR)/kty-ntfs-fs_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal FSKit executable: $@"
+	$(LIPO) -create -output $@ $^
+
+$(BIN_DIR)/kty-ntfs-fs.appex: $(BIN_DIR)/kty-ntfs-fs src/fskit/Info.plist src/fskit/entitlements.plist | $(BIN_DIR)
+	@echo "==> Packaging FSKit App Extension bundle: $@"
+	@rm -rf $@
+	@mkdir -p $@/Contents/MacOS
+	@cp src/fskit/Info.plist $@/Contents/Info.plist
+	@cp $(BIN_DIR)/kty-ntfs-fs $@/Contents/MacOS/kty-ntfs-fs
+	@./scripts/codesign-adhoc.sh $@ src/fskit/entitlements.plist
+
+fskit: $(BIN_DIR)/kty-ntfs-fs.appex
+	@echo "==> Universal FSKit App Extension built and signed successfully."
+
+$(OBJ_DIR)/arm64/test_fskit_bridge.o: tests/test_fskit_bridge.m | $(OBJ_DIR)/arm64/fskit
+	@echo "==> Compiling arm64 fskit test: $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/test_fskit_bridge.o: tests/test_fskit_bridge.m | $(OBJ_DIR)/x86_64/fskit
+	@echo "==> Compiling x86_64 fskit test: $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/test_fskit_bridge_arm64: $(OBJ_DIR)/arm64/test_fskit_bridge.o $(FSKIT_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 fskit test binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_fskit_bridge_x86_64: $(OBJ_DIR)/x86_64/test_fskit_bridge.o $(FSKIT_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 fskit test binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_fskit_bridge: $(BIN_DIR)/test_fskit_bridge_arm64 $(BIN_DIR)/test_fskit_bridge_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal fskit test binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+test_fskit_bridge: $(BIN_DIR)/test_fskit_bridge
+	@echo "==> Verifying binary architectures:"
+	$(LIPO) -info $(BIN_DIR)/test_fskit_bridge
+	@echo "==> Executing FSKit Bridge test suite:"
+	./$(BIN_DIR)/test_fskit_bridge
+
 # --- Audits & Quality Gates ---
 
 audit-claims:
 	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
 	@./scripts/audit-claims.py
 
-verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core
+verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge
 	@echo "==> Auditing Mach-O binaries for zero network symbols (KTY Invariant 1)..."
 	@for bin in $^; do \
 		echo "    Checking $$bin..."; \
@@ -138,7 +208,7 @@ verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core
 	done
 	@echo "==> Invariant verified: 0 network symbols found across all binaries."
 
-test: core smoke_test test_ntfs_core verify-invariants audit-claims
+test: core smoke_test test_ntfs_core fskit test_fskit_bridge verify-invariants audit-claims
 
 asan:
 	$(MAKE) clean
