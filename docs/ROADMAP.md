@@ -28,15 +28,16 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 2: Native FSKit Extension Scaffold (`kty-ntfs-fs.appex`)
-- [ ] Scaffold the App Extension target targeting `FSUnaryFileSystem`.
-- [ ] Implement `FSFileSystemBase` protocols:
-  - Volume probing (`probeResource`) to identify NTFS magic bytes (`NTFS    `).
-  - Capability reporting (read, write, xattr flags).
-- [ ] Implement read-only mounting:
-  - Bridge `FSBlockDeviceResource` block reads into `libkty_ntfs_core`.
-  - Implement directory lookup (`lookupItem`) and directory enumeration (`enumerateDirectory`).
-  - Implement file reading (`readFromFile`).
-- [ ] Test mounting an NTFS disk image locally and verifying directory browsing in Finder and Terminal.
+- [x] Scaffold the App Extension target targeting `FSUnaryFileSystem`.
+- [x] Implement `FSFileSystemBase` protocols:
+  - Volume probing (`probeResource`) to identify NTFS magic bytes (`NTFS    `) with deterministic container UUIDs.
+  - Capability reporting (read, write, persistent IDs, journals).
+- [x] Implement read-only mounting and core I/O bridge:
+  - Bridge `FSBlockDeviceResource` block reads/writes into `libkty_ntfs_core`.
+  - Implement directory lookup (`lookupItemNamed:`) and directory enumeration (`enumerateDirectory:` with proper EOF pagination).
+  - Implement file reading (`readFromFile:intoBuffer:`).
+- [x] Assemble `kty-ntfs-fs.appex` bundle with `Info.plist` and ad-hoc codesigning with App Sandbox entitlements.
+- [x] Write bridge test suite (`tests/test_fskit_bridge.m`) verifying probing, capability reporting, pagination, and C bridge I/O under `make test` and `make asan`.
 
 ---
 
