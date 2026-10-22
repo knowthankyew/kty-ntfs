@@ -15,11 +15,13 @@ CFLAGS_COMMON = -isysroot $(SDKROOT) -Wall -Wextra -O2 -fstack-protector-strong 
 CFLAGS_ARM64 = $(CFLAGS_COMMON) -target arm64-apple-macos$(TARGET_OS_MIN)
 CFLAGS_X86_64 = $(CFLAGS_COMMON) -target x86_64-apple-macos$(TARGET_OS_MIN)
 
-OBJCFLAGS_COMMON = $(CFLAGS_COMMON) -fobjc-arc -Wno-unguarded-availability-new -Isrc/fskit
+OBJCFLAGS_COMMON = $(CFLAGS_COMMON) -fobjc-arc -Wno-unguarded-availability-new -Isrc/fskit -Isrc/daemon
 OBJCFLAGS_ARM64 = $(OBJCFLAGS_COMMON) -target arm64-apple-macos$(TARGET_OS_MIN)
 OBJCFLAGS_X86_64 = $(OBJCFLAGS_COMMON) -target x86_64-apple-macos$(TARGET_OS_MIN)
 
 FSKIT_FRAMEWORKS = -framework Foundation -framework FSKit
+DA_FRAMEWORKS = -framework Foundation -framework DiskArbitration
+DAEMON_FRAMEWORKS = $(FSKIT_FRAMEWORKS) -framework DiskArbitration
 
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
@@ -36,11 +38,19 @@ FSKIT_SRCS = src/fskit/KTYItem.m src/fskit/KTYVolume.m src/fskit/KTYUnaryFileSys
 FSKIT_OBJS_ARM64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/arm64/fskit/%.o,$(FSKIT_SRCS))
 FSKIT_OBJS_X86_64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/x86_64/fskit/%.o,$(FSKIT_SRCS))
 
-.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge test verify-invariants audit-claims asan
+DAEMON_SRCS = src/daemon/KTYDaemon.m
+DAEMON_OBJS_ARM64 = $(OBJ_DIR)/arm64/daemon/KTYDaemon.o
+DAEMON_OBJS_X86_64 = $(OBJ_DIR)/x86_64/daemon/KTYDaemon.o
 
-all: core smoke_test test_ntfs_core fskit test_fskit_bridge
+CLI_SRCS = src/cli/main.m
+CLI_OBJS_ARM64 = $(OBJ_DIR)/arm64/cli/main.o
+CLI_OBJS_X86_64 = $(OBJ_DIR)/x86_64/cli/main.o
 
-$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit:
+.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test verify-invariants audit-claims asan
+
+all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli
+
+$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit $(OBJ_DIR)/arm64/daemon $(OBJ_DIR)/x86_64/daemon $(OBJ_DIR)/arm64/cli $(OBJ_DIR)/x86_64/cli:
 	@mkdir -p $@
 
 # --- Core Static Library Compilation ---
@@ -199,13 +209,94 @@ test_fskit_bridge: $(BIN_DIR)/test_fskit_bridge
 	@echo "==> Executing FSKit Bridge test suite:"
 	./$(BIN_DIR)/test_fskit_bridge
 
+# --- Phase 5 Autonomous Daemon (kty-ntfsd) ---
+
+$(OBJ_DIR)/arm64/daemon/%.o: src/daemon/%.m | $(OBJ_DIR)/arm64/daemon
+	@echo "==> Compiling arm64 (daemon): $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/daemon/%.o: src/daemon/%.m | $(OBJ_DIR)/x86_64/daemon
+	@echo "==> Compiling x86_64 (daemon): $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/kty-ntfsd_arm64: $(OBJ_DIR)/arm64/daemon/main.o $(DAEMON_OBJS_ARM64) $(FSKIT_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 daemon binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(DAEMON_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfsd_x86_64: $(OBJ_DIR)/x86_64/daemon/main.o $(DAEMON_OBJS_X86_64) $(FSKIT_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 daemon binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(DAEMON_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfsd: $(BIN_DIR)/kty-ntfsd_arm64 $(BIN_DIR)/kty-ntfsd_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal daemon binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+daemon: $(BIN_DIR)/kty-ntfsd
+	@echo "==> Universal kty-ntfsd built successfully."
+
+# --- Phase 5 Companion CLI (kty-ntfs) ---
+
+$(OBJ_DIR)/arm64/cli/%.o: src/cli/%.m | $(OBJ_DIR)/arm64/cli
+	@echo "==> Compiling arm64 (cli): $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/cli/%.o: src/cli/%.m | $(OBJ_DIR)/x86_64/cli
+	@echo "==> Compiling x86_64 (cli): $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/kty-ntfs_arm64: $(CLI_OBJS_ARM64) | $(BIN_DIR)
+	@echo "==> Linking arm64 CLI binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(DA_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs_x86_64: $(CLI_OBJS_X86_64) | $(BIN_DIR)
+	@echo "==> Linking x86_64 CLI binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(DA_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs: $(BIN_DIR)/kty-ntfs_arm64 $(BIN_DIR)/kty-ntfs_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal CLI binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+cli: $(BIN_DIR)/kty-ntfs
+	@echo "==> Universal kty-ntfs CLI built successfully."
+
+# --- Phase 5 Daemon & CLI Test Harness ---
+
+$(OBJ_DIR)/arm64/test_daemon_cli.o: tests/test_daemon_cli.m | $(OBJ_DIR)/arm64/daemon
+	@echo "==> Compiling arm64 daemon/cli test: $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/test_daemon_cli.o: tests/test_daemon_cli.m | $(OBJ_DIR)/x86_64/daemon
+	@echo "==> Compiling x86_64 daemon/cli test: $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/test_daemon_cli_arm64: $(OBJ_DIR)/arm64/test_daemon_cli.o $(DAEMON_OBJS_ARM64) $(FSKIT_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 daemon/cli test binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(DAEMON_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_daemon_cli_x86_64: $(OBJ_DIR)/x86_64/test_daemon_cli.o $(DAEMON_OBJS_X86_64) $(FSKIT_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 daemon/cli test binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(DAEMON_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_daemon_cli: $(BIN_DIR)/test_daemon_cli_arm64 $(BIN_DIR)/test_daemon_cli_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal daemon/cli test binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+test_daemon_cli: $(BIN_DIR)/test_daemon_cli $(BIN_DIR)/kty-ntfs
+	@echo "==> Verifying binary architectures:"
+	$(LIPO) -info $(BIN_DIR)/test_daemon_cli
+	@echo "==> Executing Daemon & CLI test suite:"
+	./$(BIN_DIR)/test_daemon_cli $(BIN_DIR)/kty-ntfs
+
 # --- Audits & Quality Gates ---
 
 audit-claims:
 	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
 	@./scripts/audit-claims.py
 
-verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge
+verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge $(BIN_DIR)/kty-ntfsd $(BIN_DIR)/kty-ntfs $(BIN_DIR)/test_daemon_cli
 	@echo "==> Auditing Mach-O binaries for zero network symbols (KTY Invariant 1)..."
 	@for bin in $^; do \
 		echo "    Checking $$bin..."; \
@@ -216,7 +307,7 @@ verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kt
 	done
 	@echo "==> Invariant verified: 0 network symbols found across all binaries."
 
-test: core smoke_test test_ntfs_core fskit test_fskit_bridge verify-invariants audit-claims
+test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli verify-invariants audit-claims
 
 asan:
 	$(MAKE) clean
