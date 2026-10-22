@@ -29,6 +29,9 @@ static NSXPCConnection *GetDaemonConnection(void) {
 
 static int CommandStatus(BOOL jsonOutput) {
     NSXPCConnection *conn = GetDaemonConnection();
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
     id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
         if (jsonOutput) {
             printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error.localizedDescription.UTF8String);
@@ -36,10 +39,9 @@ static int CommandStatus(BOOL jsonOutput) {
             fprintf(stderr, "Error connecting to kty-ntfsd daemon: %s\n", error.localizedDescription.UTF8String);
             fprintf(stderr, "Ensure kty-ntfsd is running (launchctl load /Library/LaunchDaemons/com.knowthankyew.ntfsd.plist).\n");
         }
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
     }];
-
-    __block int exitCode = 0;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     [proxy getStatusWithReply:^(NSDictionary * _Nullable status, NSError * _Nullable error) {
         if (error || !status) {
@@ -69,22 +71,32 @@ static int CommandStatus(BOOL jsonOutput) {
         dispatch_semaphore_signal(sem);
     }];
 
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+        if (!jsonOutput) {
+            fprintf(stderr, "Error: Timeout waiting for kty-ntfsd daemon response.\n");
+        }
+        exitCode = 1;
+    }
     [conn invalidate];
     return exitCode;
 }
 
 static int CommandList(BOOL jsonOutput) {
     NSXPCConnection *conn = GetDaemonConnection();
-    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
-        if (!jsonOutput) {
-            fprintf(stderr, "Notice: Daemon not reachable (%s); scanning local system disks...\n", error.localizedDescription.UTF8String);
-        }
-    }];
-
     __block int exitCode = 0;
     __block BOOL receivedReply = NO;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        if (jsonOutput) {
+            printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error.localizedDescription.UTF8String);
+        } else {
+            fprintf(stderr, "Notice: Daemon not reachable (%s); scanning local system disks...\n", error.localizedDescription.UTF8String);
+            printf("No response from daemon. Run 'kty-ntfsd' to start autonomous management.\n");
+        }
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
 
     [proxy listDisksWithReply:^(NSArray<NSDictionary *> * _Nullable disks, NSError * _Nullable error) {
         if (!error && disks) {
@@ -116,16 +128,26 @@ static int CommandList(BOOL jsonOutput) {
                            hygiene.UTF8String);
                 }
             }
+        } else {
+            if (jsonOutput) {
+                printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "unknown error");
+            } else {
+                fprintf(stderr, "Error listing disks: %s\n", error ? error.localizedDescription.UTF8String : "unknown error");
+            }
+            exitCode = 1;
         }
         dispatch_semaphore_signal(sem);
     }];
 
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
-    [conn invalidate];
-
-    if (!receivedReply && !jsonOutput) {
-        printf("No response from daemon. Run 'kty-ntfsd' to start autonomous management.\n");
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) != 0) {
+        if (!receivedReply) {
+            if (!jsonOutput) {
+                printf("No response from daemon. Run 'kty-ntfsd' to start autonomous management.\n");
+            }
+            exitCode = 1;
+        }
     }
+    [conn invalidate];
 
     return exitCode;
 }
@@ -145,12 +167,14 @@ static int CommandMount(NSString *device, NSString *target, BOOL readOnly, BOOL 
     }
 
     NSXPCConnection *conn = GetDaemonConnection();
-    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
-        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
-    }];
-
     __block int exitCode = 0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
 
     [proxy mountDevice:device
             targetPath:target
@@ -169,7 +193,10 @@ static int CommandMount(NSString *device, NSString *target, BOOL readOnly, BOOL 
         dispatch_semaphore_signal(sem);
     }];
 
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+        fprintf(stderr, "Error: Timeout waiting for daemon response\n");
+        exitCode = 1;
+    }
     [conn invalidate];
     return exitCode;
 }
@@ -181,12 +208,14 @@ static int CommandUnmount(NSString *target) {
     }
 
     NSXPCConnection *conn = GetDaemonConnection();
-    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
-        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
-    }];
-
     __block int exitCode = 0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
 
     [proxy unmountTarget:target withReply:^(BOOL success, NSError * _Nullable error) {
         if (!success || error) {
@@ -199,7 +228,10 @@ static int CommandUnmount(NSString *target) {
         dispatch_semaphore_signal(sem);
     }];
 
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+        fprintf(stderr, "Error: Timeout waiting for daemon response\n");
+        exitCode = 1;
+    }
     [conn invalidate];
     return exitCode;
 }

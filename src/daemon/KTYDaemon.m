@@ -57,6 +57,7 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
 
 @interface KTYDaemon () {
     DASessionRef _daSession;
+    CFRunLoopRef _scheduledRunLoop;
 }
 @property (nonatomic, assign) time_t startTime;
 @property (nonatomic, strong) NSXPCListener *listener;
@@ -116,7 +117,9 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
         /* Initialize DiskArbitration Session */
         _daSession = DASessionCreate(kCFAllocatorDefault);
         if (_daSession) {
-            DASessionScheduleWithRunLoop(_daSession, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+            _scheduledRunLoop = CFRunLoopGetCurrent();
+            CFRetain(_scheduledRunLoop);
+            DASessionScheduleWithRunLoop(_daSession, _scheduledRunLoop, kCFRunLoopDefaultMode);
             DARegisterDiskAppearedCallback(_daSession, NULL, KTYDiskAppearedCallback, (__bridge void *)self);
             DARegisterDiskDisappearedCallback(_daSession, NULL, KTYDiskDisappearedCallback, (__bridge void *)self);
             DARegisterDiskMountApprovalCallback(_daSession, NULL, KTYDiskMountApprovalCallback, (__bridge void *)self);
@@ -145,7 +148,11 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
         [self.mountedVolumes removeAllObjects];
 
         if (_daSession) {
-            DASessionUnscheduleFromRunLoop(_daSession, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+            if (_scheduledRunLoop) {
+                DASessionUnscheduleFromRunLoop(_daSession, _scheduledRunLoop, kCFRunLoopDefaultMode);
+                CFRelease(_scheduledRunLoop);
+                _scheduledRunLoop = NULL;
+            }
             CFRelease(_daSession);
             _daSession = NULL;
         }
@@ -305,6 +312,12 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
         for (KTYMountedVolumeInfo *info in self.mountedVolumes.allValues) {
             NSMutableDictionary *d = [[info toDictionary] mutableCopy];
             d[@"is_mounted"] = @YES;
+            if (self.detectedDisks[info.bsdName]) {
+                NSDictionary *rawDesc = self.detectedDisks[info.bsdName];
+                if (rawDesc[(NSString *)kDADiskDescriptionMediaSizeKey]) {
+                    d[@"media_size"] = rawDesc[(NSString *)kDADiskDescriptionMediaSizeKey];
+                }
+            }
             [list addObject:d];
         }
 
@@ -375,11 +388,15 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
         }
 
         NSString *cleanTarget = [targetPathOrBSD stringByReplacingOccurrencesOfString:@"/dev/" withString:@""];
+        NSString *stdTarget = [targetPathOrBSD stringByStandardizingPath];
         NSString *foundKey = nil;
 
         for (NSString *key in self.mountedVolumes) {
             KTYMountedVolumeInfo *info = self.mountedVolumes[key];
-            if ([info.bsdName isEqualToString:cleanTarget] || [info.mountPoint isEqualToString:targetPathOrBSD]) {
+            NSString *stdMount = [info.mountPoint stringByStandardizingPath];
+            if ([info.bsdName isEqualToString:cleanTarget] ||
+                [info.mountPoint isEqualToString:targetPathOrBSD] ||
+                [stdMount isEqualToString:stdTarget]) {
                 foundKey = key;
                 break;
             }
@@ -407,7 +424,7 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
     reply(YES, nil);
     dispatch_async(dispatch_get_main_queue(), ^{
         [self stop];
-        CFRunLoopStop(CFRunLoopGetCurrent());
+        CFRunLoopStop(CFRunLoopGetMain());
     });
 }
 

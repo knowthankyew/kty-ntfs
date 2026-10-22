@@ -336,6 +336,19 @@ static void test_cli_subcommands(const char *cliPath) {
         /* Test unmount without target */
         assert(runCLI(@[@"unmount"], &outStr) == 1);
         assert([outStr containsString:@"Usage: kty-ntfs unmount"]);
+
+        /* Test daemon-backed commands when daemon is offline (must fail-closed with exit code 1) */
+        assert(runCLI(@[@"status"], &outStr) == 1);
+        assert([outStr containsString:@"Error connecting to kty-ntfsd daemon"] || [outStr containsString:@"Error:"]);
+
+        assert(runCLI(@[@"list"], &outStr) == 1);
+        assert([outStr containsString:@"Notice: Daemon not reachable"] || [outStr containsString:@"No response from daemon"]);
+
+        assert(runCLI(@[@"mount", @"disk99s1"], &outStr) == 1);
+        assert([outStr containsString:@"Error connecting to daemon"] || [outStr containsString:@"Error:"]);
+
+        assert(runCLI(@[@"unmount", @"disk99s1"], &outStr) == 1);
+        assert([outStr containsString:@"Error connecting to daemon"] || [outStr containsString:@"Error:"]);
     }
     printf("    PASSED: test_cli_subcommands\n");
 }
