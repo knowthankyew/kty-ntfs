@@ -70,17 +70,18 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 5: Autonomous Daemon (`kty-ntfsd`) & CLI (`kty-ntfs`)
-- [ ] Develop `kty-ntfsd`:
-  - Initialize `DiskArbitration` session.
-  - Listen for NTFS partition GUIDs (`EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`).
-  - Intercept the system's default read-only mount and route to `kty-ntfs-fs.appex`.
-  - Provide an XPC / local socket interface for status and manual unmounts.
-- [ ] Develop `kty-ntfs` CLI:
-  - `kty-ntfs list`: Show attached NTFS volumes and their mount status.
-  - `kty-ntfs mount <device> <target>`: Manual mount invocation with forensic flags.
-  - `kty-ntfs unmount <target>`: Graceful flush and unmount.
-  - `kty-ntfs status`: Query daemon status and active transaction metrics.
-- [ ] Create `launchd` service plist for automated background execution of `kty-ntfsd`.
+- [x] Develop `kty-ntfsd`:
+  - Initialize `DiskArbitration` session with thread-safe run loop management.
+  - Listen for NTFS partition GUIDs (`EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`) and volume identifiers.
+  - Intercept the system's default read-only mount via `DADissenterCreate(kDAReturnBusy)` and route to the `kty-ntfs` engine.
+  - Provide an Apple XPC interface over Mach messaging (`com.knowthankyew.ntfsd`) with zero networking symbols for status, mounts, unmounts, and metrics.
+- [x] Develop `kty-ntfs` CLI:
+  - `kty-ntfs list`: Show attached NTFS volumes, capacity, and forensic hygiene status.
+  - `kty-ntfs mount <device> [options]`: Manual mount invocation with forensic flags (`--allow-system-metadata`, `--readonly`, `--target`).
+  - `kty-ntfs unmount <target>`: Graceful flush, journal sync, and unmount with standardized path handling.
+  - `kty-ntfs status`: Query daemon status, PID, uptime, forensic cleanliness mode, and active transaction/byte metrics.
+  - Fail-closed IPC error handling, non-blocking offline error responses, and CLI timeouts.
+- [x] Create `launchd` service plist (`com.knowthankyew.ntfsd.plist`) for automated background execution of `kty-ntfsd`.
 
 ---
 
