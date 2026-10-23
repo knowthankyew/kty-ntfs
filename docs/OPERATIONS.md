@@ -138,13 +138,16 @@ kty-ntfs status
 ```
 Example Output:
 ```text
-=== kty-ntfs Status ===
-Daemon PID:       48192
-Uptime:           3600 seconds
-Forensic Hygiene: ACTIVE (Host metadata suppressed)
-Mounted Volumes:  1
-Total Tx Handled: 124
-Total Bytes I/O:  104857600 (100.00 MB)
+kty-ntfsd Daemon Status:
+  Daemon Version:             0.1.0
+  PID:                        48192
+  Uptime:                     3600 seconds
+  Active Mounts:              1
+  Detected Disks:             1
+  Active Transactions:        124
+  Total Bytes Written:        104857600 bytes
+  Suppressed Metadata Ops:    18 (.DS_Store / Spotlight dropped)
+  Forensic Hygiene Mode:      STRICT (Host metadata suppressed by default)
 ```
 
 JSON output for scripting and orchestration:
@@ -158,14 +161,9 @@ kty-ntfs list
 ```
 Example Output:
 ```text
-=== Attached NTFS Volumes ===
-Device:       /dev/disk4s1
-BSD Name:     disk4s1
-Volume Name:  EVIDENCE_01
-Capacity:     64.00 GB
-Mount Point:  /Volumes/EVIDENCE_01
-Forensic:     CLEAN (Metadata suppressed)
-Status:       MOUNTED (Read/Write)
+IDENTIFIER     VOLUME NAME          CAPACITY     STATUS       HYGIENE MODE
+----------------------------------------------------------------------------------
+disk4s1        EVIDENCE_01          64.0 GB      Mounted      STRICT (Clean)
 ```
 
 JSON output:
