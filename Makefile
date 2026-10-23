@@ -46,9 +46,9 @@ CLI_SRCS = src/cli/main.m
 CLI_OBJS_ARM64 = $(OBJ_DIR)/arm64/cli/main.o
 CLI_OBJS_X86_64 = $(OBJ_DIR)/x86_64/cli/main.o
 
-.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test verify-invariants audit-claims asan
+.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture torture generate-bundle test verify-invariants audit-claims asan
 
-all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli
+all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture
 
 $(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit $(OBJ_DIR)/arm64/daemon $(OBJ_DIR)/x86_64/daemon $(OBJ_DIR)/arm64/cli $(OBJ_DIR)/x86_64/cli:
 	@mkdir -p $@
@@ -290,13 +290,48 @@ test_daemon_cli: $(BIN_DIR)/test_daemon_cli $(BIN_DIR)/kty-ntfs
 	@echo "==> Executing Daemon & CLI test suite:"
 	./$(BIN_DIR)/test_daemon_cli $(BIN_DIR)/kty-ntfs
 
+# --- Phase 6 Forensic Torture Testing & Validation ---
+
+$(OBJ_DIR)/arm64/test_torture.o: tests/test_torture.m | $(OBJ_DIR)/arm64/fskit
+	@echo "==> Compiling arm64 torture test: $<"
+	$(CC) $(OBJCFLAGS_ARM64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/test_torture.o: tests/test_torture.m | $(OBJ_DIR)/x86_64/fskit
+	@echo "==> Compiling x86_64 torture test: $<"
+	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
+
+$(BIN_DIR)/test_torture_arm64: $(OBJ_DIR)/arm64/test_torture.o $(FSKIT_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking arm64 torture test binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_torture_x86_64: $(OBJ_DIR)/x86_64/test_torture.o $(FSKIT_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
+	@echo "==> Linking x86_64 torture test binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(FSKIT_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/test_torture: $(BIN_DIR)/test_torture_arm64 $(BIN_DIR)/test_torture_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal torture test binary: $@"
+	$(LIPO) -create -output $@ $^
+	@./scripts/codesign-adhoc.sh $@
+
+test_torture: $(BIN_DIR)/test_torture
+	@echo "==> Verifying binary architectures:"
+	$(LIPO) -info $(BIN_DIR)/test_torture
+	@echo "==> Executing Forensic Torture test suite:"
+	./$(BIN_DIR)/test_torture
+
+torture: test_torture
+
+generate-bundle: $(BIN_DIR)/test_torture
+	@echo "==> Generating standalone Windows 11 cross-platform forensic test bundle..."
+	./$(BIN_DIR)/test_torture --generate-bundle build/kty_test_evidence.img
+
 # --- Audits & Quality Gates ---
 
 audit-claims:
 	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
 	@./scripts/audit-claims.py
 
-verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge $(BIN_DIR)/kty-ntfsd $(BIN_DIR)/kty-ntfs $(BIN_DIR)/test_daemon_cli
+verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge $(BIN_DIR)/kty-ntfsd $(BIN_DIR)/kty-ntfs $(BIN_DIR)/test_daemon_cli $(BIN_DIR)/test_torture
 	@echo "==> Auditing Mach-O binaries for zero network symbols (KTY Invariant 1)..."
 	@for bin in $^; do \
 		echo "    Checking $$bin..."; \
@@ -307,7 +342,7 @@ verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kt
 	done
 	@echo "==> Invariant verified: 0 network symbols found across all binaries."
 
-test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli verify-invariants audit-claims
+test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture verify-invariants audit-claims
 
 asan:
 	$(MAKE) clean
