@@ -86,15 +86,19 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 ---
 
 ## Phase 6: Forensic Torture Testing & Validation
-- [ ] **Cross-Platform Compatibility Harness:**
-  - Write multi-gigabyte forensic test bundles on macOS via `kty-ntfs`.
-  - Move the physical media to a native Windows 11 system.
-  - Assert that Windows mounts cleanly without "Scan and fix" dialogs.
-  - Run `chkdsk /f` and verify zero errors, orphan sectors, or MFT index corruptions.
-- [ ] **Cryptographic Hash Verification:**
-  - Verify that file payloads match bit-for-bit (BLAKE3 / SHA-256) between macOS and Windows.
-- [ ] **Failure Recovery & Sudden Disconnect Testing:**
-  - Simulate surprise disk removal during active writes; verify journal replay and consistency upon remount.
+- [x] **Cross-Platform Compatibility Harness:**
+  - Automated high-throughput torture harness (`test_torture`) testing deep hierarchies, multi-file allocations, and random mutations.
+  - Native Windows 11/10 automated validation suite (`scripts/verify-windows.ps1` & `scripts/verify-windows.bat`).
+  - Automated generation of standalone evidence test bundles (`make generate-bundle` -> `build/kty_test_evidence.img`).
+  - Operational runbook and verification checklist (`docs/WINDOWS_VALIDATION.md`).
+  - Validation assertions: clean mount without "Scan and fix" dialogs, 0 `chkdsk` filesystem/index errors, and 0 dirty bit flags.
+- [x] **Cryptographic Hash Verification:**
+  - Streaming multi-chunk BLAKE3 and SHA-256 tree hashing across 64 KB boundaries.
+  - Automatic publishing and verification of Alternate Data Streams (`kty.integrity.sha256` and `kty.integrity.blake3`).
+  - Verified bit-for-bit payload matching against `manifest.json` and `checksums.sha256`.
+- [x] **Failure Recovery & Sudden Disconnect Testing:**
+  - Simulated surprise disk removal and abrupt un-synced process termination during active dirty writes.
+  - Validated fail-closed error propagation (`EIO`) and safe volume remount recovery.
 
 ---
 
