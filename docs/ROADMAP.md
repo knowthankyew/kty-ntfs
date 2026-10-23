@@ -102,10 +102,33 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 
 ---
 
-## Phase 7: Hardening, Packaging & Release
-- [ ] Code signing transition:
-  - Package with Apple Developer ID certificate.
-  - Apply `com.apple.developer.fskit.fsmodule` entitlement.
-  - Configure notarization pipeline.
-- [ ] Create standalone installation package / brew formula for the daemon and CLI.
-- [ ] Documentation, operational runbooks, and integration examples for the `knowthankyew` suite.
+## Phase 7: Local Hardening, Packaging, Installation & Operational Runbooks
+- [x] **Local Code Signing & Identity Automation:**
+  - Configurable identity signing support via `KTY_CODESIGN_IDENTITY` in `scripts/codesign-adhoc.sh` (defaulting to ad-hoc `-`).
+  - Automated local self-signed certificate generation script (`scripts/create-self-signed-cert.sh`) with code signing EKU and Keychain import.
+  - Non-interactive ad-hoc signing for rapid local CLI, daemon, and harness testing without keychain authorization dialogs.
+- [x] **Standalone Packaging & System Integration:**
+  - Automated installer (`scripts/install.sh`) supporting binary, appex, and launchd plist installation with root/wheel permissions and configurable `PREFIX`.
+  - Standalone uninstaller (`scripts/uninstall.sh`) for clean daemon unload, binary removal, and optional log purging.
+  - Homebrew formula (`Formula/kty-ntfs.rb`) for source builds and brew service management.
+  - Makefile integration (`make install` and `make uninstall`).
+- [x] **Documentation & Operational Runbooks:**
+  - Comprehensive operational runbook (`docs/OPERATIONS.md`) detailing setup, daemon lifecycle, CLI operations, forensic hygiene policies, ADS integrity verification, troubleshooting, and self-signed certificate management.
+  - Updated `README.md` with installation commands, local self-signing options, and operational runbook links.
+
+---
+
+## Phase 8: Apple Developer Account Registration, Notarization & Distribution (Future)
+- [ ] **Apple Developer Program Enrollment:**
+  - Register Apple Developer Program account and acquire Team ID.
+  - Generate official Apple Developer ID Application code signing certificates.
+- [ ] **Restricted Entitlement Provisioning:**
+  - Submit request and secure Apple authorization for the restricted `com.apple.developer.fskit.fsmodule` entitlement.
+  - Integrate provisioning profiles into CI/CD release build pipeline.
+- [ ] **Automated Notarization Pipeline:**
+  - Configure automated Apple Notarization pipeline (`xcrun notarytool` / `stapler`).
+  - Strict hardened runtime verification without ad-hoc overrides.
+- [ ] **Distribution Packaging:**
+  - Create signed and notarized `.pkg` / `.dmg` installers for end-user distribution.
+  - Provide official signed Homebrew Cask tap and explore Mac App Store submission.
+

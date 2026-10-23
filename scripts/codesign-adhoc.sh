@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # codesign-adhoc.sh
-# Performs ad-hoc code signing on built Mach-O binaries and App Extensions (.appex)
+# Performs code signing on built Mach-O binaries and App Extensions (.appex)
+# Supports ad-hoc signing (default: "-") or a custom self-signed/Developer ID identity via KTY_CODESIGN_IDENTITY.
 # Enforces Fail-Closed security: invalid or missing entitlements file halts execution.
 
 TARGET="${1:-}"
@@ -18,10 +19,16 @@ if [[ ! -e "$TARGET" ]]; then
 fi
 
 ENTITLEMENTS="${2:-}"
+IDENTITY="${KTY_CODESIGN_IDENTITY:--}"
 
-echo "[codesign] Signing $TARGET (ad-hoc)..."
-
-CODESIGN_ARGS=(--force --sign - --options runtime)
+if [[ "$IDENTITY" == "-" ]]; then
+    echo "[codesign] Signing $TARGET (ad-hoc)..."
+    CODESIGN_ARGS=(--force --sign - --options runtime)
+else
+    echo "[codesign] Signing $TARGET (identity: $IDENTITY)..."
+    # When signing with a local self-signed or Developer ID identity, use timestamp=none to prevent network timeouts during offline builds
+    CODESIGN_ARGS=(--force --sign "$IDENTITY" --options runtime --timestamp=none)
+fi
 
 # Only apply --deep if the target is a directory or app extension bundle
 if [[ -d "$TARGET" ]]; then
@@ -41,3 +48,4 @@ codesign "${CODESIGN_ARGS[@]}" "$TARGET"
 echo "[codesign] Verifying $TARGET..."
 codesign --verify --verbose "$TARGET"
 echo "[codesign] Successfully signed $TARGET."
+

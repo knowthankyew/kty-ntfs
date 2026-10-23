@@ -17,22 +17,24 @@ Part of the **knowthankyew** portfolio.
 
 ---
 
-## Current Status: Testable Today vs. Phase 7 Release
+## Current Status: Testable Today vs. Phase 8 Distribution
 
-| Component | Status | How to Test Today |
+| Component | Status | How to Test / Operate Today |
 | :--- | :---: | :--- |
 | **Headless NTFS-3G Engine** | **Ready** | Unit tested via `build/bin/test_ntfs_core` (read/write, cluster allocation, BLAKE3/SHA-256). |
 | **FSKit Extension Bridge** | **Ready** | Integration tested via `build/bin/test_fskit_bridge` (metadata tombstones, ADS xattrs, journal sync). |
-| **Autonomous Daemon (`kty-ntfsd`)** | **Ready** | Runnable executable (`build/bin/kty-ntfsd`) handling local Mach XPC & DiskArbitration. |
-| **Companion CLI (`kty-ntfs`)** | **Ready** | Command-line tool (`build/bin/kty-ntfs`) supporting `status`, `list`, `mount`, and `unmount`. |
-| **Torture & Cross-Platform Validation** | **Phase 6** | Multi-gigabyte continuous stress harness, simulated surprise disconnects, and Windows 11 `chkdsk` parity. |
-| **System-Wide Finder Auto-Mounting** | **Phase 7** | Requires Apple Developer ID signing and Apple-approved `com.apple.developer.fskit.fsmodule` entitlement. |
+| **Autonomous Daemon (`kty-ntfsd`)** | **Ready** | Background service installed to `/Library/LaunchDaemons/com.knowthankyew.ntfsd.plist`. |
+| **Companion CLI (`kty-ntfs`)** | **Ready** | Universal CLI tool (`kty-ntfs`) supporting `status`, `list`, `mount`, and `unmount`. |
+| **Torture & Stress Harness** | **Ready** | High-throughput stress harness (`make torture`) and Windows 11 cross-platform suite (`verify-windows.ps1`). |
+| **Packaging & Installation** | **Ready** | Standalone installer (`sudo make install`) and Homebrew formula (`Formula/kty-ntfs.rb`). |
+| **Local Self-Signing & Ad-Hoc** | **Ready** | Automated cert generation (`scripts/create-self-signed-cert.sh`) and ad-hoc runtime signing. |
+| **Apple Developer ID & Notarization** | **Phase 8** | Scheduled for Phase 8 following Apple Developer Program enrollment. |
 
 > [!NOTE]
-> **Ad-Hoc Signing vs. System-Wide Finder Integration:**  
-> To prevent system instability, macOS 14+ enforces that system-wide FSKit extensions registered with `fskitd` for Finder auto-mounting must be signed with an Apple Developer ID certificate carrying the restricted `com.apple.developer.fskit.fsmodule` entitlement (or require SIP disabled in Recovery via `csrutil disable`).  
+> **Ad-Hoc / Self-Signed vs. System-Wide Finder Integration:**  
+> On macOS 14+ (Sonoma) and macOS 15+ (Sequoia), Apple's `fskitd` daemon requires an official Apple Developer ID certificate carrying the restricted `com.apple.developer.fskit.fsmodule` entitlement for Finder auto-mounting (or SIP disabled in Recovery via `csrutil disable`).  
 > 
-> During development (Phases 0–6), all binaries use **local ad-hoc codesigning**. You can fully run, test, and benchmark the daemon, CLI, cryptographic engine, and filesystem bridge immediately without modifying macOS security policies.
+> `kty-ntfs` operates locally using **local ad-hoc codesigning** (default) or **self-signed certificates**. You can fully run, install, test, mount, unmount, and benchmark the daemon, CLI, cryptographic engine, and filesystem bridge immediately without modifying macOS security policies. Official Apple Developer ID signing and Mac App Store packaging are scheduled for Phase 8.
 
 ---
 
@@ -108,12 +110,55 @@ Output:
 ./build/bin/kty-ntfs help
 ```
 
+### 4. System Installation & Service Management
+
+To install `kty-ntfs` system-wide and register the autonomous background daemon with `launchd`:
+
+```bash
+# Install binaries to /usr/local/bin, appex to /Library/Filesystems, and launchd daemon
+sudo make install
+
+# Query daemon status system-wide
+kty-ntfs status
+
+# List attached NTFS partitions
+kty-ntfs list
+```
+
+To uninstall cleanly:
+```bash
+sudo make uninstall
+```
+
+#### Homebrew Installation
+```bash
+brew install --build-from-source Formula/kty-ntfs.rb
+sudo brew services start kty-ntfs
+```
+
+### 5. Local Code Signing & Identity Configuration
+
+`kty-ntfs` supports two local signing modes prior to Apple Developer ID enrollment:
+
+1. **Ad-Hoc Signing (Default):**
+   `make all` automatically signs all binaries with ad-hoc signatures (`--sign -`) and the hardened runtime. This requires no setup and is ideal for CLI and daemon testing.
+
+2. **Local Self-Signed Certificate:**
+   To generate a local code-signing identity in your macOS Keychain:
+   ```bash
+   ./scripts/create-self-signed-cert.sh
+   export KTY_CODESIGN_IDENTITY="kty-ntfs-local"
+   make clean && make all
+   ```
+
 ---
 
 ## Documentation
 
+- [Operations & Administration Runbook](docs/OPERATIONS.md)
 - [Architecture Specification](docs/ARCHITECTURE.md)
 - [Implementation Roadmap](docs/ROADMAP.md)
+- [Windows 11 Validation Runbook](docs/WINDOWS_VALIDATION.md)
 - [Legal, Privacy, and Attribution Notice](NOTICE.md)
 
 ---

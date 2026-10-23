@@ -46,7 +46,7 @@ CLI_SRCS = src/cli/main.m
 CLI_OBJS_ARM64 = $(OBJ_DIR)/arm64/cli/main.o
 CLI_OBJS_X86_64 = $(OBJ_DIR)/x86_64/cli/main.o
 
-.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture torture generate-bundle test verify-invariants audit-claims asan
+.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture torture generate-bundle test verify-invariants audit-claims asan install uninstall
 
 all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture
 
@@ -347,6 +347,16 @@ test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_dae
 asan:
 	$(MAKE) clean
 	$(MAKE) EXTRA_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" test
+
+# --- Installation & Deployment ---
+
+PREFIX ?= /usr/local
+
+install: all
+	@PREFIX=$(PREFIX) ./scripts/install.sh
+
+uninstall:
+	@PREFIX=$(PREFIX) ./scripts/uninstall.sh
 
 clean:
 	@echo "==> Cleaning build artifacts..."
