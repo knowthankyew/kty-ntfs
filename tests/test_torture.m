@@ -849,6 +849,15 @@ static void generate_cross_platform_bundle(NSString *outputImagePath, NSString *
         dispatch_semaphore_wait(syncSem, DISPATCH_TIME_FOREVER);
         [vol cleanup];
 
+        /* Ensure destination parent directory exists */
+        NSString *parentDir = [outputImagePath stringByDeletingLastPathComponent];
+        if (parentDir.length > 0) {
+            [[NSFileManager defaultManager] createDirectoryAtPath:parentDir
+                                      withIntermediateDirectories:YES
+                                                       attributes:nil
+                                                            error:nil];
+        }
+
         /* Write disk image file */
         NSError *writeErr = nil;
         if (![res.storage writeToFile:outputImagePath options:NSDataWritingAtomic error:&writeErr]) {
@@ -864,11 +873,19 @@ static void generate_cross_platform_bundle(NSString *outputImagePath, NSString *
             @"total_files": @(manifestEntries.count),
             @"files": manifestEntries
         };
-        NSData *manifestData = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingPrettyPrinted error:nil];
-        [manifestData writeToFile:manifestPath atomically:YES];
+        NSError *manifestErr = nil;
+        NSData *manifestData = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingPrettyPrinted error:&manifestErr];
+        if (!manifestData || ![manifestData writeToFile:manifestPath options:NSDataWritingAtomic error:&manifestErr]) {
+            fprintf(stderr, "Error saving manifest %s: %s\n", manifestPath.UTF8String, manifestErr.localizedDescription.UTF8String);
+            exit(1);
+        }
 
         /* Write checksums.sha256 */
-        [checksumsStr writeToFile:checksumsPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSError *checksumErr = nil;
+        if (![checksumsStr writeToFile:checksumsPath atomically:YES encoding:NSUTF8StringEncoding error:&checksumErr]) {
+            fprintf(stderr, "Error saving checksums %s: %s\n", checksumsPath.UTF8String, checksumErr.localizedDescription.UTF8String);
+            exit(1);
+        }
 
         printf("    Bundle Image:  %s (%llu bytes)\n", outputImagePath.UTF8String, bundleDiskSize);
         printf("    Manifest:      %s\n", manifestPath.UTF8String);
@@ -883,8 +900,6 @@ int main(int argc, const char *argv[]) {
 
     BOOL generateBundle = NO;
     NSString *bundleImgPath = @"build/kty_test_evidence.img";
-    NSString *manifestPath = @"build/manifest.json";
-    NSString *checksumsPath = @"build/checksums.sha256";
 
     for (int i = 1; i < argc; i++) {
         NSString *arg = [NSString stringWithUTF8String:argv[i]];
@@ -893,8 +908,23 @@ int main(int argc, const char *argv[]) {
             if (i + 1 < argc && ![[NSString stringWithUTF8String:argv[i+1]] hasPrefix:@"--"]) {
                 bundleImgPath = [NSString stringWithUTF8String:argv[++i]];
             }
+        } else if ([arg isEqualToString:@"--help"] || [arg isEqualToString:@"-h"]) {
+            printf("Usage: test_torture [options]\n\n");
+            printf("Options:\n");
+            printf("  --generate-bundle [path]  Generate cross-platform forensic test bundle (default: build/kty_test_evidence.img)\n");
+            printf("  --help, -h                Show this help reference\n\n");
+            return 0;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", arg.UTF8String);
+            printf("Usage: test_torture [--generate-bundle [path]] [--help]\n");
+            return 1;
         }
     }
+
+    NSString *bundleDir = [bundleImgPath stringByDeletingLastPathComponent];
+    if (bundleDir.length == 0) bundleDir = @".";
+    NSString *manifestPath = [bundleDir stringByAppendingPathComponent:@"manifest.json"];
+    NSString *checksumsPath = [bundleDir stringByAppendingPathComponent:@"checksums.sha256"];
 
     test_deep_hierarchy_and_volume_stress();
     test_random_mutation_and_relocation_torture();

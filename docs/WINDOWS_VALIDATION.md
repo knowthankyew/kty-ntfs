@@ -66,14 +66,20 @@ The script will automatically:
 ### 1. On macOS: Format or Write to USB Drive
 Plug your USB drive into your Mac and note its BSD node (e.g. `/dev/disk4s1`).
 
-Run the companion CLI to mount and write forensic evidence:
+Generate the cross-platform forensic test bundle:
 ```bash
-./build/bin/kty-ntfs mount disk4s1
+make generate-bundle
 ```
 
-Copy your evidence or run the torture test suite targeting the drive:
+Option A: Write the generated evidence image directly to the physical USB partition:
 ```bash
-./build/bin/test_torture --target-disk /dev/disk4s1
+sudo dd if=build/kty_test_evidence.img of=/dev/rdisk4s1 bs=1m status=progress
+```
+
+Option B: Mount the target disk via `kty-ntfs` companion CLI and copy forensic files:
+```bash
+./build/bin/kty-ntfs mount disk4s1
+# Copy evidence files or case folders to /Volumes/disk4s1 ...
 ./build/bin/kty-ntfs unmount disk4s1
 ```
 

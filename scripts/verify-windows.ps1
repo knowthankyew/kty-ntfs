@@ -51,13 +51,23 @@ try {
         $mountResult = Mount-DiskImage -ImagePath $fullImgPath -StorageType RAW -PassThru
         $mountedImage = $true
 
-        # Retrieve assigned volume letter
-        $volumeInfo = $mountResult | Get-DiskImage | Get-Disk | Get-Partition | Get-Volume
-        if (-not $volumeInfo -or -not $volumeInfo.DriveLetter) {
+        # Retrieve assigned volume letter safely (handling array outputs and automount delay)
+        $volumes = @($mountResult | Get-DiskImage | Get-Disk | Get-Partition | Get-Volume)
+        $volWithDrive = $volumes | Where-Object { $_.DriveLetter } | Select-Object -First 1
+        if (-not $volWithDrive -or -not $volWithDrive.DriveLetter) {
+            # Attempt to assign a drive letter if partition exists but letter unassigned
+            $partition = @($mountResult | Get-DiskImage | Get-Disk | Get-Partition | Where-Object { $_.Type -ne 'Reserved' }) | Select-Object -First 1
+            if ($partition -and -not $partition.DriveLetter) {
+                $partition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction SilentlyContinue | Out-Null
+                Start-Sleep -Milliseconds 500
+                $volWithDrive = @($partition | Get-Volume | Where-Object { $_.DriveLetter }) | Select-Object -First 1
+            }
+        }
+        if (-not $volWithDrive -or -not $volWithDrive.DriveLetter) {
             Write-Error "Failed to obtain drive letter for mounted image. Ensure volume has an NTFS partition."
             exit 1
         }
-        $targetDrive = "$($volumeInfo.DriveLetter):"
+        $targetDrive = "$($volWithDrive.DriveLetter):"
         Write-Host "      Successfully mounted as $targetDrive" -ForegroundColor Green
     }
 
@@ -65,7 +75,7 @@ try {
     Write-Host "`n[2/5] Checking Volume Dirty Bit ($targetDrive)..." -ForegroundColor Yellow
     $dirtyQuery = fsutil dirty query $targetDrive
     Write-Host "      $dirtyQuery"
-    if ($dirtyQuery -notmatch "NOT dirty") {
+    if ($dirtyQuery -match "is dirty" -and $dirtyQuery -notmatch "NOT dirty") {
         Write-Error "FAIL: Volume dirty bit is SET! Windows detected uncommitted journal transactions or corruption."
         exit 1
     }
@@ -77,7 +87,7 @@ try {
     $chkdskText = $chkdskOutput -join "`n"
 
     # Analyze chkdsk results
-    if ($chkdskText -match "Windows has found problems" -or $chkdskText -match "errors found") {
+    if ($chkdskText -match "Windows has found problems" -or $chkdskText -match "errors found" -or ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE)) {
         Write-Host $chkdskText -ForegroundColor Red
         Write-Error "FAIL: CHKDSK identified filesystem errors!"
         exit 1
@@ -122,7 +132,7 @@ try {
             Write-Host "      [OK] $relPath (Size: $($item.Length) bytes, SHA-256 verified)" -ForegroundColor Green
 
             # Step 5: Alternate Data Streams (ADS) Verification
-            if ($file.PSObject.Properties['ads']) {
+            if ($file.PSObject.Properties['ads'] -and $file.ads) {
                 foreach ($prop in $file.ads.PSObject.Properties) {
                     $streamName = $prop.Name
                     $expectedStreamVal = $prop.Value
@@ -153,6 +163,6 @@ try {
 } finally {
     if ($mountedImage -and (Test-Path $ImagePath)) {
         Write-Host "`nCleaning up: Dismounting disk image..." -ForegroundColor Gray
-        Dismount-DiskImage -ImagePath (Resolve-Path $ImagePath).Path | Out-Null
+        Dismount-DiskImage -ImagePath (Resolve-Path $ImagePath).Path -ErrorAction SilentlyContinue | Out-Null
     }
 }
