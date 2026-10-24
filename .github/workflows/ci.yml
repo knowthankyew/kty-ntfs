@@ -12,7 +12,7 @@ permissions:
 jobs:
   validate:
     name: Build, Audit, Test & Attest (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
       id-token: write
@@ -45,7 +45,7 @@ jobs:
       - name: Verify Final Claims Parity & CycloneDX SBOM
         run: python3 ./scripts/audit-claims.py
 
-      - name: Package Release Bundle & Checksums
+      - name: Package Release Bundle, CycloneDX SBOM (cdxgen-compatible 1.5) & Checksums
         run: |
           mkdir -p dist
           ditto -c -k --sequesterRsrc --keepParent build/bin/kty-ntfs-menu.app dist/kty-ntfs-menu-v0.1.0.zip
