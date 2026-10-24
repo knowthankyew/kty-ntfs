@@ -287,7 +287,7 @@ static int CommandMount(NSString *device, NSString *target, BOOL readOnly, BOOL 
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
-        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        fprintf(stderr, "Error connecting to kty-ntfsd daemon: %s\n", error.localizedDescription.UTF8String);
         exitCode = 1;
         dispatch_semaphore_signal(sem);
     }];
@@ -332,7 +332,7 @@ static int CommandUnmount(NSString *target) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
 
     id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
-        fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        fprintf(stderr, "Error connecting to kty-ntfsd daemon: %s\n", error.localizedDescription.UTF8String);
         exitCode = 1;
         dispatch_semaphore_signal(sem);
     }];

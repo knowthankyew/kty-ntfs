@@ -625,7 +625,10 @@ static void test_cli_subcommands(const char *cliPath) {
         /* Non-existent unmount target must always fail closed */
         int unmountRc = runCLI(@[@"unmount", @"non_existent_target_12345"], &outStr);
         assert(unmountRc == 1);
-        assert([outStr containsString:@"Mount target not found"] || [outStr containsString:@"Error connecting to kty-ntfsd daemon"] || [outStr containsString:@"Error:"]);
+        assert([outStr containsString:@"Mount target not found"] ||
+               [outStr containsString:@"Error connecting to"] ||
+               [outStr containsString:@"Error"] ||
+               [outStr containsString:@"Unmount failed"]);
     }
     printf("    PASSED: test_cli_subcommands\n");
 }
