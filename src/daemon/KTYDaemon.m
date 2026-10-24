@@ -406,7 +406,8 @@ static NSString *KTYDetermineFileSystemType(NSDictionary *desc) {
             d[@"kty_managed"] = @NO;
             if (isMounted) {
                 NSURL *pathURL = rawDesc[(NSString *)kDADiskDescriptionVolumePathKey];
-                d[@"mount_point"] = [pathURL respondsToSelector:@selector(path)] ? pathURL.path : [pathURL description];
+                NSString *mPoint = [pathURL respondsToSelector:@selector(path)] ? pathURL.path : [pathURL description];
+                d[@"mount_point"] = mPoint ?: @"";
             } else {
                 d[@"mount_point"] = @"";
             }

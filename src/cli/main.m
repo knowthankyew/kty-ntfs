@@ -168,16 +168,19 @@ static int CommandList(BOOL jsonOutput) {
             }];
 
             NSMutableArray<NSDictionary *> *enrichedDisks = [NSMutableArray array];
+            DASessionRef fallbackSession = NULL;
             for (NSDictionary *d in sortedDisks) {
                 NSMutableDictionary *mut = [d mutableCopy];
                 NSString *fsType = mut[@"fs_type"] ?: mut[@"volume_type"];
                 if (!fsType || [fsType isEqualToString:@"-"] || [fsType isEqualToString:@"Unknown"]) {
                     NSString *bsd = mut[@"bsd_name"];
                     if (bsd && bsd.length > 0) {
-                        DASessionRef session = DASessionCreate(kCFAllocatorDefault);
-                        if (session) {
+                        if (!fallbackSession) {
+                            fallbackSession = DASessionCreate(kCFAllocatorDefault);
+                        }
+                        if (fallbackSession) {
                             NSString *devPath = [NSString stringWithFormat:@"/dev/%@", bsd];
-                            DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, devPath.UTF8String);
+                            DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, fallbackSession, devPath.UTF8String);
                             if (disk) {
                                 CFDictionaryRef desc = DADiskCopyDescription(disk);
                                 if (desc) {
@@ -186,7 +189,6 @@ static int CommandList(BOOL jsonOutput) {
                                 }
                                 CFRelease(disk);
                             }
-                            CFRelease(session);
                         }
                     }
                 }
@@ -196,6 +198,9 @@ static int CommandList(BOOL jsonOutput) {
                 mut[@"fs_type"] = fsType;
                 mut[@"volume_type"] = fsType;
                 [enrichedDisks addObject:mut];
+            }
+            if (fallbackSession) {
+                CFRelease(fallbackSession);
             }
 
             if (jsonOutput) {
