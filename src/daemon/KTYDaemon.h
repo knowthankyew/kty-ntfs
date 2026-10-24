@@ -30,6 +30,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, readonly, nullable) NSXPCListener *listener;
 @property (nonatomic, strong, readonly) NSMutableDictionary<NSString *, KTYMountedVolumeInfo *> *mountedVolumes;
 @property (nonatomic, strong, readonly) NSMutableDictionary<NSString *, NSDictionary *> *detectedDisks;
+@property (nonatomic, strong, readonly) NSMutableDictionary<NSString *, NSDictionary *> *autoMountTargets;
 
 + (instancetype)sharedDaemon;
 - (instancetype)initWithMachServiceName:(nullable NSString *)serviceName;

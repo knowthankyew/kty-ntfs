@@ -675,7 +675,7 @@ error_exit:
  *
  * Return 0 on success and -1 on error with errno set error code.
  */
-static int ntfs_volume_check_logfile(ntfs_volume *vol)
+int ntfs_volume_check_logfile(ntfs_volume *vol)
 {
 	ntfs_inode *ni;
 	ntfs_attr *na = NULL;

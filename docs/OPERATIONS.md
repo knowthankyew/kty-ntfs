@@ -199,6 +199,81 @@ kty-ntfs unmount /dev/disk4s1
 kty-ntfs unmount /Volumes/EVIDENCE_01
 ```
 
+### Safety Pre-Flight & Fast Startup Inspection (`kty-ntfs check`)
+Inspects target NTFS volumes or devices for Windows Fast Startup (hibernation state), cached metadata, and dirty journal flags:
+
+```bash
+# Human-readable diagnostic output
+kty-ntfs check disk0s4
+kty-ntfs check /Volumes/BOOTCAMP
+
+# Machine-readable JSON output
+kty-ntfs check disk0s4 --json
+```
+
+### Auto-Mount & Volume Target Rules (`kty-ntfs config`)
+Query and configure persistent auto-mount behavior for specific partitions (such as local Boot Camp partitions or external media):
+
+```bash
+# Display current configuration and configured volume targets
+kty-ntfs config
+
+# Output configuration as JSON
+kty-ntfs config --json
+
+# Configure a specific volume to automatically mount in read/write mode
+kty-ntfs config --target BOOTCAMP --enable
+
+# Configure a specific volume to automatically mount in safe read-only mode
+kty-ntfs config --target BOOTCAMP --enable --readonly
+
+# Disable auto-mount rule for a specific volume
+kty-ntfs config --target BOOTCAMP --disable
+
+# Toggle global daemon auto-mount management
+kty-ntfs config --auto-mount on
+kty-ntfs config --auto-mount off
+```
+
+---
+
+## 5. Boot Camp & Windows Fast Startup Coexistence
+
+### The Fast Startup Risk
+When Windows shuts down with "Fast Startup" enabled (Windows default), it does not unmount filesystems cleanly. Instead, Windows logs off the user, puts the kernel and active filesystem caches into hibernation (`hiberfil.sys`), and leaves the NTFS journal in a dirty state.
+
+Writing to a hibernated NTFS partition from macOS desynchronizes the on-disk state from Windows' cached memory state. Upon subsequent boot, Windows will either overwrite files created from macOS or trigger destructive `chkdsk` rollbacks.
+
+### Safety Invariant & Automated Handling
+`kty-ntfs` implements strict fail-closed safety for Boot Camp partitions:
+1. **Pre-Flight Inspection**: Prior to mounting write-enabled, `kty-ntfs` checks the `hiberfil.sys` header for `HIBR` / `hibr` magic and tests the `$LogFile` restart pages.
+2. **Fail-Closed Protection**: If Fast Startup is detected, `kty-ntfs` blocks write mounting and outputs a step-by-step resolution guide.
+3. **Apple Read-Only Lock Dismount**: When Fast Startup is verified disabled and safe, `kty-ntfs` automatically dismounts macOS's default read-only kernel mount and claims the volume with full read/write support.
+
+### Disabling Windows Fast Startup (How to Turn Off Fastboot)
+
+#### Method 1: Windows Control Panel GUI (Recommended for UI Users)
+1. Boot into Windows.
+2. Open **Control Panel** and navigate to: `Hardware and Sound` &rarr; `Power Options`.
+3. In the left navigation pane, click **"Choose what the power buttons do"**.
+4. Click the administrator shield link: **"Change settings that are currently unavailable"**.
+5. Under *Shutdown settings* at the bottom of the window, uncheck:
+   `[ ] Turn on fast startup (recommended)`
+6. Click **Save changes** and restart your computer.
+
+#### Method 2: Command Prompt / PowerShell (CLI Shortcut)
+Open Command Prompt or PowerShell as Administrator and run:
+```cmd
+powercfg /h off
+```
+*(This disables hibernation and turns off Fast Startup immediately).*
+
+#### Method 3: One-Time Clean Cold Restart
+Hold down the `Shift` key while clicking **Shut down** or **Restart** in the Windows Start menu, or run:
+```cmd
+shutdown /s /t 0
+```
+
 ---
 
 ## 5. Forensic Hygiene & Integrity Verification

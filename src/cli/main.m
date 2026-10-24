@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <DiskArbitration/DiskArbitration.h>
 #import "KTYDaemonProtocol.h"
+#include "kty_safety.h"
 
 static void PrintHelp(void) {
     printf("kty-ntfs - Native NTFS Companion CLI (knowthankyew)\n\n");
@@ -8,6 +9,8 @@ static void PrintHelp(void) {
     printf("  kty-ntfs list [--json]                     List detected and mounted NTFS partitions\n");
     printf("  kty-ntfs mount <device> [options]          Mount an NTFS partition\n");
     printf("  kty-ntfs unmount <target>                  Gracefully unmount a volume or device\n");
+    printf("  kty-ntfs check <device-or-path> [--json]   Inspect volume for Windows Fast Startup safety\n");
+    printf("  kty-ntfs config [options]                  Query or update auto-mount volume rules\n");
     printf("  kty-ntfs status [--json]                   Query kty-ntfsd daemon status & metrics\n");
     printf("  kty-ntfs help, --help, -h                  Show this help reference\n\n");
     printf("Mount Options:\n");
@@ -16,6 +19,11 @@ static void PrintHelp(void) {
     printf("      --allow-system-metadata  WARNING: Allow Finder/Spotlight host metadata (.DS_Store,\n");
     printf("                               Spotlight-V100, Trashes) on the destination media.\n");
     printf("                               Default is STRICT HYGIENE (metadata suppressed in RAM).\n\n");
+    printf("Config Options:\n");
+    printf("  --target <name/uuid>         Target volume for rule (e.g. BOOTCAMP)\n");
+    printf("  --enable / --disable         Enable or disable auto-mount for targeted volume\n");
+    printf("  --readonly                   Configure target to auto-mount read-only\n");
+    printf("  --auto-mount <on|off>        Toggle global auto-mount daemon state\n\n");
     printf("Portfolio Invariants:\n");
     printf("  Zero Network Egress | Zero Kernel Extensions | Bit-for-Bit Hash Integrity\n");
 }
@@ -288,7 +296,11 @@ static int CommandMount(NSString *device, NSString *target, BOOL readOnly, BOOL 
    allowSystemMetadata:allowMetadata
              withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
         if (error || !result) {
-            fprintf(stderr, "Mount failed: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+            if (error.userInfo[@"KTYGuidance"]) {
+                printf("\n%s\n", [error.userInfo[@"KTYGuidance"] UTF8String]);
+            } else {
+                fprintf(stderr, "Mount failed: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+            }
             exitCode = 1;
         } else {
             printf("==> Successfully claimed and mounted device: %s\n", [result[@"device_node"] UTF8String]);
@@ -342,6 +354,231 @@ static int CommandUnmount(NSString *target) {
     return exitCode;
 }
 
+static int CommandCheck(NSString *target, BOOL jsonOutput) {
+    if (!target || target.length == 0) {
+        fprintf(stderr, "Error: Target volume or device required for check (e.g. BOOTCAMP, disk0s4, or /Volumes/BOOTCAMP)\n");
+        return 1;
+    }
+
+    NSXPCConnection *conn = GetDaemonConnection();
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        (void)error;
+        /* Direct in-process fallback if daemon is offline */
+        kty_safety_report_t rep;
+        int rc = kty_check_volume_safety(target.UTF8String, &rep);
+        if (rc < 0) {
+            if (jsonOutput) {
+                printf("{\"status\": \"error\", \"message\": \"%s\"}\n", rep.status_summary[0] ? rep.status_summary : "Safety check failed");
+            } else {
+                fprintf(stderr, "Error inspecting target '%s': %s\n", target.UTF8String, rep.status_summary[0] ? rep.status_summary : "Safety check failed");
+            }
+            exitCode = 1;
+        } else {
+            char guidanceBuf[2048] = {0};
+            kty_format_fast_startup_guidance(rep.volume_name, guidanceBuf, sizeof(guidanceBuf));
+            if (jsonOutput) {
+                NSDictionary *d = @{
+                    @"target": target,
+                    @"volume_name": [NSString stringWithUTF8String:rep.volume_name],
+                    @"has_hiberfile": @(rep.has_hiberfile),
+                    @"is_hibernated": @(rep.is_hibernated),
+                    @"is_dirty": @(rep.is_dirty),
+                    @"metadata_cached": @(rep.metadata_cached),
+                    @"safe_for_write": @(rep.safe_for_write),
+                    @"status_summary": [NSString stringWithUTF8String:rep.status_summary]
+                };
+                NSData *data = [NSJSONSerialization dataWithJSONObject:d options:NSJSONWritingPrettyPrinted error:nil];
+                printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+            } else {
+                printf("\n--- NTFS Partition Safety & Fast Startup Inspection ---\n");
+                printf("  Target:              %s\n", target.UTF8String);
+                printf("  Volume Name:         %s\n", rep.volume_name);
+                printf("  hiberfil.sys:        %s\n", rep.has_hiberfile ? "Present" : "Not Found (Disabled)");
+                printf("  Fast Startup Magic:  %s\n", rep.is_hibernated ? "ACTIVE (hibr/HIBR detected)" : "Clean (Zeroed or Inactive)");
+                printf("  Journal State:       %s\n", rep.is_dirty ? "Dirty" : "Clean");
+                printf("  Write Safety:        %s\n", rep.safe_for_write ? "SAFE FOR READ/WRITE" : "UNSAFE (Fast Startup active)");
+                printf("  Summary:             %s\n\n", rep.status_summary);
+                if (!rep.safe_for_write) {
+                    printf("%s\n", guidanceBuf);
+                }
+            }
+            exitCode = rep.safe_for_write ? 0 : 2;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+
+    [proxy checkSafetyForTarget:target withReply:^(NSDictionary * _Nullable report, NSError * _Nullable error) {
+        if (error || !report) {
+            if (jsonOutput) {
+                printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "Inspection failed");
+            } else {
+                fprintf(stderr, "Error checking safety for '%s': %s\n", target.UTF8String, error ? error.localizedDescription.UTF8String : "Unknown error");
+            }
+            exitCode = 1;
+        } else {
+            if (jsonOutput) {
+                NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil];
+                printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+            } else {
+                printf("\n--- NTFS Partition Safety & Fast Startup Inspection ---\n");
+                printf("  Target:              %s\n", [report[@"target"] UTF8String]);
+                printf("  Volume Name:         %s\n", [report[@"volume_name"] UTF8String]);
+                printf("  hiberfil.sys:        %s\n", [report[@"has_hiberfile"] boolValue] ? "Present" : "Not Found (Disabled)");
+                printf("  Fast Startup Magic:  %s\n", [report[@"is_hibernated"] boolValue] ? "ACTIVE (hibr/HIBR detected)" : "Clean (Zeroed or Inactive)");
+                printf("  Journal State:       %s\n", [report[@"is_dirty"] boolValue] ? "Dirty" : "Clean");
+                printf("  Write Safety:        %s\n", [report[@"safe_for_write"] boolValue] ? "SAFE FOR READ/WRITE" : "UNSAFE (Fast Startup active)");
+                printf("  Summary:             %s\n\n", [report[@"status_summary"] UTF8String]);
+                if (![report[@"safe_for_write"] boolValue] && report[@"guidance"]) {
+                    printf("%s\n", [report[@"guidance"] UTF8String]);
+                }
+            }
+            exitCode = [report[@"safe_for_write"] boolValue] ? 0 : 2;
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    [conn invalidate];
+    return exitCode;
+}
+
+static int CommandConfig(BOOL jsonOutput, NSString *targetVolume, NSNumber *enableAutoMount, NSNumber *readOnly) {
+    NSXPCConnection *conn = GetDaemonConnection();
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        if (!targetVolume && enableAutoMount == nil) {
+            /* Fallback to reading preferences plist directly if daemon is unreachable */
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:@"/Library/Preferences/com.knowthankyew.ntfsd.plist"];
+            BOOL autoMountEn = dict[@"auto_mount_enabled"] ? [dict[@"auto_mount_enabled"] boolValue] : YES;
+            NSDictionary *targets = dict[@"auto_mount_targets"] ?: @{};
+            NSDictionary *config = @{
+                @"auto_mount_enabled": @(autoMountEn),
+                @"auto_mount_targets": targets,
+                @"preferences_path": @"/Library/Preferences/com.knowthankyew.ntfsd.plist"
+            };
+            if (jsonOutput) {
+                NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
+                printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+            } else {
+                fprintf(stderr, "Notice: Daemon not reachable (%s); reading configuration from preferences...\n", error.localizedDescription.UTF8String);
+                printf("kty-ntfs Configuration:\n");
+                printf("  Global Auto-Mount:       %s\n", autoMountEn ? "Enabled" : "Disabled");
+                printf("  Preferences File:        %s\n", "/Library/Preferences/com.knowthankyew.ntfsd.plist");
+                printf("  Target Volume Rules:\n");
+                if (targets.count == 0) {
+                    printf("    (No specific volume rules configured; all NTFS volumes claimable)\n");
+                } else {
+                    for (NSString *key in targets) {
+                        NSDictionary *t = targets[key];
+                        printf("    - %-20s [Auto-Mount: %s, Mode: %s]\n",
+                               key.UTF8String,
+                               [t[@"enabled"] boolValue] ? "ON" : "OFF",
+                               [t[@"read_only"] boolValue] ? "Read-Only" : "Read/Write");
+                    }
+                }
+            }
+            exitCode = 0;
+            dispatch_semaphore_signal(sem);
+            return;
+        }
+
+        if (jsonOutput) {
+            printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error.localizedDescription.UTF8String);
+        } else {
+            fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        }
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
+
+    if (targetVolume) {
+        BOOL en = enableAutoMount ? [enableAutoMount boolValue] : YES;
+        BOOL ro = readOnly ? [readOnly boolValue] : NO;
+        [proxy setAutoMountTarget:targetVolume enabled:en readOnly:ro withReply:^(BOOL success, NSError * _Nullable error) {
+            if (!success || error) {
+                if (jsonOutput) {
+                    printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "Configuration failed");
+                } else {
+                    fprintf(stderr, "Failed to update target config: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+                }
+                exitCode = 1;
+            } else {
+                if (jsonOutput) {
+                    printf("{\"status\": \"success\", \"target\": \"%s\", \"enabled\": %s, \"read_only\": %s}\n",
+                           targetVolume.UTF8String, en ? "true" : "false", ro ? "true" : "false");
+                } else {
+                    printf("==> Auto-mount configuration updated for '%s':\n", targetVolume.UTF8String);
+                    printf("    Auto-Mount: %s\n", en ? "Enabled" : "Disabled");
+                    printf("    Mode:       %s\n", ro ? "Read-Only" : "Read/Write");
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    } else if (enableAutoMount != nil) {
+        BOOL en = [enableAutoMount boolValue];
+        [proxy setGlobalAutoMountEnabled:en withReply:^(BOOL success, NSError * _Nullable error) {
+            if (!success || error) {
+                if (jsonOutput) {
+                    printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "Failed to update global auto-mount state");
+                } else {
+                    fprintf(stderr, "Failed to update global auto-mount state: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+                }
+                exitCode = 1;
+            } else {
+                if (jsonOutput) {
+                    printf("{\"status\": \"success\", \"auto_mount_enabled\": %s}\n", en ? "true" : "false");
+                } else {
+                    printf("==> Global auto-mount daemon state updated: %s\n", en ? "Enabled" : "Disabled");
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    } else {
+        [proxy getConfigWithReply:^(NSDictionary * _Nullable config, NSError * _Nullable error) {
+            if (error || !config) {
+                if (jsonOutput) {
+                    printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "Unable to retrieve config");
+                } else {
+                    fprintf(stderr, "Error retrieving configuration: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+                }
+                exitCode = 1;
+            } else {
+                if (jsonOutput) {
+                    NSData *data = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
+                    printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+                } else {
+                    printf("kty-ntfs Configuration:\n");
+                    printf("  Global Auto-Mount:       %s\n", [config[@"auto_mount_enabled"] boolValue] ? "Enabled" : "Disabled");
+                    printf("  Preferences File:        %s\n", [config[@"preferences_path"] UTF8String]);
+                    printf("  Target Volume Rules:\n");
+                    NSDictionary *targets = config[@"auto_mount_targets"];
+                    if (!targets || targets.count == 0) {
+                        printf("    (No specific volume rules configured; all NTFS volumes claimable)\n");
+                    } else {
+                        for (NSString *key in targets) {
+                            NSDictionary *t = targets[key];
+                            printf("    - %-20s [Auto-Mount: %s, Mode: %s]\n",
+                                   key.UTF8String,
+                                   [t[@"enabled"] boolValue] ? "ON" : "OFF",
+                                   [t[@"read_only"] boolValue] ? "Read-Only" : "Read/Write");
+                        }
+                    }
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    }
+
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    [conn invalidate];
+    return exitCode;
+}
+
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         if (argc < 2) {
@@ -369,6 +606,45 @@ int main(int argc, const char * argv[]) {
                 if (strcmp(argv[i], "--json") == 0) json = YES;
             }
             return CommandList(json);
+        }
+
+        if ([subcmd isEqualToString:@"check"]) {
+            if (argc < 3) {
+                fprintf(stderr, "Usage: kty-ntfs check <device-or-path> [--json]\n");
+                return 1;
+            }
+            NSString *target = [NSString stringWithUTF8String:argv[2]];
+            BOOL json = NO;
+            for (int i = 3; i < argc; i++) {
+                if (strcmp(argv[i], "--json") == 0) json = YES;
+            }
+            return CommandCheck(target, json);
+        }
+
+        if ([subcmd isEqualToString:@"config"]) {
+            BOOL json = NO;
+            NSString *target = nil;
+            NSNumber *enableAutoMount = nil;
+            NSNumber *readOnly = nil;
+
+            for (int i = 2; i < argc; i++) {
+                NSString *arg = [NSString stringWithUTF8String:argv[i]];
+                if ([arg isEqualToString:@"--json"]) {
+                    json = YES;
+                } else if ([arg isEqualToString:@"--target"] && i + 1 < argc) {
+                    target = [NSString stringWithUTF8String:argv[++i]];
+                } else if ([arg isEqualToString:@"--enable"]) {
+                    enableAutoMount = @YES;
+                } else if ([arg isEqualToString:@"--disable"]) {
+                    enableAutoMount = @NO;
+                } else if ([arg isEqualToString:@"--readonly"]) {
+                    readOnly = @YES;
+                } else if ([arg isEqualToString:@"--auto-mount"] && i + 1 < argc) {
+                    NSString *val = [NSString stringWithUTF8String:argv[++i]];
+                    enableAutoMount = [val.lowercaseString isEqualToString:@"on"] ? @YES : @NO;
+                }
+            }
+            return CommandConfig(json, target, enableAutoMount, readOnly);
         }
 
         if ([subcmd isEqualToString:@"mount"]) {

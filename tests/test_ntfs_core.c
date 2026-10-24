@@ -12,6 +12,7 @@
 
 #include "kty_io.h"
 #include "kty_crypto.h"
+#include "kty_safety.h"
 #include "ntfs-3g/types.h"
 #include "ntfs-3g/layout.h"
 #include "ntfs-3g/bootsect.h"
@@ -269,6 +270,67 @@ int main(void) {
     kty_blake3_data(buf2048, sizeof(buf2048), digest);
     kty_digest_to_hex(digest, hex);
     assert(strcmp(hex, "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a") == 0);
+    printf("PASS\n");
+
+    /* Test 6: Fast Startup / Hibernation safety diagnostics & guidance */
+    printf("[test_ntfs_core] Test 6: Fast Startup / Hibernation safety checks... ");
+    uint8_t hib_buf[16] = {'h', 'i', 'b', 'r', 0};
+    assert(kty_inspect_hiberfile_header(hib_buf, sizeof(hib_buf)) == true);
+    uint8_t hib_upper[16] = {'H', 'I', 'B', 'R', 0};
+    assert(kty_inspect_hiberfile_header(hib_upper, sizeof(hib_upper)) == true);
+    uint8_t clean_buf[16] = {0};
+    assert(kty_inspect_hiberfile_header(clean_buf, sizeof(clean_buf)) == false);
+    assert(kty_inspect_hiberfile_header(NULL, 16) == false);
+    assert(kty_inspect_hiberfile_header(hib_buf, 3) == false);
+
+    /* Verify guidance text completeness */
+    char guide[2048] = {0};
+    assert(kty_format_fast_startup_guidance("BOOTCAMP", guide, sizeof(guide)) > 0);
+    assert(strstr(guide, "disable fastboot") != NULL || strstr(guide, "Turn off Fastboot") != NULL);
+    assert(strstr(guide, "Control Panel") != NULL);
+    assert(strstr(guide, "Power Options") != NULL);
+    assert(strstr(guide, "Turn on fast startup") != NULL);
+    assert(strstr(guide, "powercfg /h off") != NULL);
+    assert(strstr(guide, "shutdown /s /t 0") != NULL);
+    assert(strstr(guide, "--readonly") != NULL);
+
+    /* Directory-based safety verification */
+    char test_dir[] = "/tmp/kty_test_vol_XXXXXX";
+    assert(mkdtemp(test_dir) != NULL);
+    kty_safety_report_t rep;
+
+    /* 6a: Directory without hiberfil.sys */
+    assert(kty_check_volume_safety(test_dir, &rep) == 0);
+    assert(rep.has_hiberfile == false);
+    assert(rep.is_hibernated == false);
+    assert(rep.safe_for_write == true);
+
+    /* 6b: Directory with zeroed hiberfil.sys (clean shutdown) */
+    char hiber_path[512];
+    snprintf(hiber_path, sizeof(hiber_path), "%s/hiberfil.sys", test_dir);
+    int hfd = open(hiber_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    assert(hfd >= 0);
+    uint8_t zero_page[4096] = {0};
+    assert(write(hfd, zero_page, sizeof(zero_page)) == sizeof(zero_page));
+    close(hfd);
+    assert(kty_check_volume_safety(test_dir, &rep) == 0);
+    assert(rep.has_hiberfile == true);
+    assert(rep.is_hibernated == false);
+    assert(rep.safe_for_write == true);
+
+    /* 6c: Directory with active hibernation magic (Fast Startup active) */
+    hfd = open(hiber_path, O_WRONLY | O_TRUNC);
+    assert(hfd >= 0);
+    memcpy(zero_page, "HIBR", 4);
+    assert(write(hfd, zero_page, sizeof(zero_page)) == sizeof(zero_page));
+    close(hfd);
+    assert(kty_check_volume_safety(test_dir, &rep) == 0);
+    assert(rep.has_hiberfile == true);
+    assert(rep.is_hibernated == true);
+    assert(rep.safe_for_write == false);
+
+    unlink(hiber_path);
+    rmdir(test_dir);
     printf("PASS\n");
 
     printf("[test_ntfs_core] All headless NTFS engine tests passed successfully!\n");

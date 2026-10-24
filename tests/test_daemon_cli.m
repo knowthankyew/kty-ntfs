@@ -83,6 +83,20 @@ static void test_mount_approval_evaluation(void) {
 
         /* 6. Nil dictionary or nil disk returns NULL */
         assert([daemon evaluateMountApprovalForDiskDescription:nil] == NULL);
+
+        /* 7. Specific target disabled via autoMountTargets */
+        daemon.autoMountEnabled = YES;
+        daemon.autoMountTargets[@"BOOTCAMP"] = @{
+            @"target": @"BOOTCAMP",
+            @"enabled": @NO,
+            @"read_only": @NO
+        };
+        NSDictionary *bootcampDesc = @{
+            (NSString *)kDADiskDescriptionMediaContentKey: @"Windows_NTFS",
+            (NSString *)kDADiskDescriptionVolumeNameKey: @"BOOTCAMP"
+        };
+        DADissenterRef d6 = [daemon evaluateMountApprovalForDiskDescription:bootcampDesc];
+        assert(d6 == NULL);
         assert([daemon evaluateMountApprovalForDisk:NULL] == NULL);
 
         [daemon stop];
@@ -286,7 +300,115 @@ static void test_daemon_xpc_lifecycle_and_operations(void) {
             assert(unmountErr.code == ENOENT);
         }
 
-        /* 9. Disk disappears */
+        /* 9. Test Config API over XPC */
+        {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block NSDictionary *cfg = nil;
+            [proxy getConfigWithReply:^(NSDictionary * _Nullable config, NSError * _Nullable error) {
+                (void)error;
+                cfg = config;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(cfg != nil);
+            assert(cfg[@"auto_mount_enabled"] != nil);
+
+            /* Set target rule */
+            sem = dispatch_semaphore_create(0);
+            __block BOOL setOk = NO;
+            [proxy setAutoMountTarget:@"BOOTCAMP" enabled:YES readOnly:NO withReply:^(BOOL success, NSError * _Nullable error) {
+                (void)error;
+                setOk = success;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(setOk == YES);
+
+            /* Verify target in config */
+            sem = dispatch_semaphore_create(0);
+            [proxy getConfigWithReply:^(NSDictionary * _Nullable config, NSError * _Nullable error) {
+                (void)error;
+                cfg = config;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(cfg[@"auto_mount_targets"][@"BOOTCAMP"] != nil);
+            assert([cfg[@"auto_mount_targets"][@"BOOTCAMP"][@"enabled"] boolValue] == YES);
+
+            /* Toggle global auto-mount */
+            sem = dispatch_semaphore_create(0);
+            setOk = NO;
+            [proxy setGlobalAutoMountEnabled:NO withReply:^(BOOL success, NSError * _Nullable error) {
+                (void)error;
+                setOk = success;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(setOk == YES);
+
+            sem = dispatch_semaphore_create(0);
+            [proxy getConfigWithReply:^(NSDictionary * _Nullable config, NSError * _Nullable error) {
+                (void)error;
+                cfg = config;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert([cfg[@"auto_mount_enabled"] boolValue] == NO);
+
+            /* Re-enable global auto-mount */
+            sem = dispatch_semaphore_create(0);
+            [proxy setGlobalAutoMountEnabled:YES withReply:^(BOOL success, NSError * _Nullable error) {
+                (void)success;
+                (void)error;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+        }
+
+        /* 10. Test Safety check over XPC */
+        {
+            char tempVol[] = "/tmp/kty_xpc_test_XXXXXX";
+            assert(mkdtemp(tempVol) != NULL);
+            NSString *tempPath = [NSString stringWithUTF8String:tempVol];
+
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block NSDictionary *report = nil;
+            [proxy checkSafetyForTarget:tempPath withReply:^(NSDictionary * _Nullable rep, NSError * _Nullable error) {
+                (void)error;
+                report = rep;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(report != nil);
+            assert([report[@"safe_for_write"] boolValue] == YES);
+
+            /* Add active hiberfil.sys */
+            NSString *hPath = [tempPath stringByAppendingPathComponent:@"hiberfil.sys"];
+            int fd = open(hPath.UTF8String, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            assert(fd >= 0);
+            uint8_t hibrData[4096] = {'H', 'I', 'B', 'R', 0};
+            assert(write(fd, hibrData, sizeof(hibrData)) == sizeof(hibrData));
+            close(fd);
+
+            sem = dispatch_semaphore_create(0);
+            report = nil;
+            [proxy checkSafetyForTarget:tempPath withReply:^(NSDictionary * _Nullable rep, NSError * _Nullable error) {
+                (void)error;
+                report = rep;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(report != nil);
+            assert([report[@"safe_for_write"] boolValue] == NO);
+            assert([report[@"is_hibernated"] boolValue] == YES);
+            assert(report[@"guidance"] != nil);
+            assert([report[@"guidance"] containsString:@"Turn off Fastboot"] || [report[@"guidance"] containsString:@"disable fastboot"]);
+
+            unlink(hPath.UTF8String);
+            rmdir(tempVol);
+        }
+
+        /* 11. Disk disappears */
         [daemon registerDiskDisappeared:@"disk7s1"];
         assert(daemon.detectedDisks[@"disk7s1"] == nil);
 
@@ -370,6 +492,45 @@ static void test_cli_subcommands(const char *cliPath) {
         } else {
             assert(listRc == 1);
             assert([outStr containsString:@"Notice: Daemon not reachable"] || [outStr containsString:@"No response from daemon"]);
+        }
+
+        /* Test check command on clean directory */
+        char cliTempVol[] = "/tmp/kty_cli_test_XXXXXX";
+        assert(mkdtemp(cliTempVol) != NULL);
+        NSString *cliTempPath = [NSString stringWithUTF8String:cliTempVol];
+
+        int checkCleanRc = runCLI(@[@"check", cliTempPath], &outStr);
+        assert(checkCleanRc == 0);
+        assert([outStr containsString:@"SAFE FOR READ/WRITE"]);
+
+        /* Test check with active hibernation */
+        NSString *cliHiber = [cliTempPath stringByAppendingPathComponent:@"hiberfil.sys"];
+        int cfd = open(cliHiber.UTF8String, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        assert(cfd >= 0);
+        uint8_t cHibr[4096] = {'h', 'i', 'b', 'r', 0};
+        assert(write(cfd, cHibr, sizeof(cHibr)) == sizeof(cHibr));
+        close(cfd);
+
+        int checkHibRc = runCLI(@[@"check", cliTempPath], &outStr);
+        assert(checkHibRc == 2);
+        assert([outStr containsString:@"UNSAFE"]);
+        assert([outStr containsString:@"Control Panel"] && [outStr containsString:@"powercfg /h off"]);
+
+        /* Test check --json */
+        int checkJsonRc = runCLI(@[@"check", cliTempPath, @"--json"], &outStr);
+        assert(checkJsonRc == 2);
+        assert([outStr containsString:@"\"safe_for_write\" : false"]);
+
+        unlink(cliHiber.UTF8String);
+        rmdir(cliTempVol);
+
+        /* Test config command */
+        int configRc = runCLI(@[@"config"], &outStr);
+        if (configRc == 0) {
+            assert([outStr containsString:@"Configuration"] || [outStr containsString:@"Auto-Mount"]);
+        } else {
+            assert(configRc == 1);
+            assert([outStr containsString:@"Error connecting to daemon"] || [outStr containsString:@"Error:"]);
         }
 
         /* Non-existent unmount target must always fail closed */

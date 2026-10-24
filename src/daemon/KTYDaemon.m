@@ -1,6 +1,9 @@
 #import "KTYDaemon.h"
 #import <sys/stat.h>
+#import <sys/param.h>
+#import <sys/mount.h>
 #import <unistd.h>
+#include "kty_safety.h"
 
 @implementation KTYMountedVolumeInfo
 
@@ -66,9 +69,34 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
 @property (nonatomic, strong) NSXPCListener *listener;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, KTYMountedVolumeInfo *> *mountedVolumes;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *detectedDisks;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *autoMountTargets;
 @end
 
+static NSString * const KTYPreferencesFilePath = @"/Library/Preferences/com.knowthankyew.ntfsd.plist";
+
 @implementation KTYDaemon
+
+- (void)loadPreferences {
+    if ([[NSFileManager defaultManager] fileExistsAtPath:KTYPreferencesFilePath]) {
+        NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:KTYPreferencesFilePath];
+        if (dict) {
+            if (dict[@"auto_mount_enabled"]) {
+                _autoMountEnabled = [dict[@"auto_mount_enabled"] boolValue];
+            }
+            if ([dict[@"auto_mount_targets"] isKindOfClass:[NSDictionary class]]) {
+                _autoMountTargets = [dict[@"auto_mount_targets"] mutableCopy];
+            }
+        }
+    }
+}
+
+- (void)savePreferences {
+    NSDictionary *dict = @{
+        @"auto_mount_enabled": @(self.autoMountEnabled),
+        @"auto_mount_targets": self.autoMountTargets ?: @{}
+    };
+    [dict writeToFile:KTYPreferencesFilePath atomically:YES];
+}
 
 + (instancetype)sharedDaemon {
     static KTYDaemon *instance = nil;
@@ -87,7 +115,9 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
         _startTime = time(NULL);
         _mountedVolumes = [NSMutableDictionary dictionary];
         _detectedDisks = [NSMutableDictionary dictionary];
+        _autoMountTargets = [NSMutableDictionary dictionary];
         _daSession = NULL;
+        [self loadPreferences];
     }
     return self;
 }
@@ -209,6 +239,19 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
         }
 
         if (isNTFS) {
+            NSString *bsdName = dict[(NSString *)kDADiskDescriptionMediaBSDNameKey];
+            NSString *volName = dict[(NSString *)kDADiskDescriptionVolumeNameKey];
+            NSString *volUUID = [dict[(NSString *)kDADiskDescriptionMediaUUIDKey] description];
+
+            NSDictionary *rule = nil;
+            if (volName && self.autoMountTargets[volName]) rule = self.autoMountTargets[volName];
+            if (!rule && bsdName && self.autoMountTargets[bsdName]) rule = self.autoMountTargets[bsdName];
+            if (!rule && volUUID && self.autoMountTargets[volUUID]) rule = self.autoMountTargets[volUUID];
+
+            if (rule && [rule[@"enabled"] boolValue] == NO) {
+                return NULL; /* User explicitly disabled auto-mounting for this volume */
+            }
+
             /* Dissents standard read-only kernel mount, claiming for kty-ntfs */
             DADissenterRef dissenter = DADissenterCreate(
                 kCFAllocatorDefault,
@@ -445,16 +488,63 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
             return;
         }
 
+        NSDictionary *rawDesc = self.detectedDisks[bsd];
+
+        /* Check Fast Startup & safety preflight if write mount is requested */
+        if (!readOnly) {
+            kty_safety_report_t report;
+            NSString *checkTarget = [NSString stringWithFormat:@"/dev/%@", bsd];
+            if (rawDesc && rawDesc[(NSString *)kDADiskDescriptionVolumePathKey]) {
+                NSURL *mUrl = rawDesc[(NSString *)kDADiskDescriptionVolumePathKey];
+                NSString *mPath = [mUrl respondsToSelector:@selector(path)] ? mUrl.path : [mUrl description];
+                if (mPath.length > 0) {
+                    checkTarget = mPath;
+                }
+            }
+
+            int sRc = kty_check_volume_safety(checkTarget.UTF8String, &report);
+            if (sRc == 0 && (!report.safe_for_write || report.is_hibernated || report.metadata_cached)) {
+                char guidanceBuf[2048] = {0};
+                NSString *volName = rawDesc[(NSString *)kDADiskDescriptionVolumeNameKey] ?: bsd;
+                kty_format_fast_startup_guidance(volName.UTF8String, guidanceBuf, sizeof(guidanceBuf));
+
+                NSDictionary *userInfo = @{
+                    NSLocalizedDescriptionKey: @"Windows Fast Startup (Hibernation) is active. Write access blocked to prevent Windows filesystem corruption.",
+                    @"KTYFastStartupActive": @YES,
+                    @"KTYGuidance": [NSString stringWithUTF8String:guidanceBuf],
+                    @"status_summary": [NSString stringWithUTF8String:report.status_summary]
+                };
+                reply(nil, [NSError errorWithDomain:@"com.knowthankyew.kty-ntfs.safety" code:EPERM userInfo:userInfo]);
+                return;
+            }
+        }
+
+        /* If macOS default driver has this device mounted read-only, safely unmount it first */
+        if (rawDesc && rawDesc[(NSString *)kDADiskDescriptionVolumePathKey]) {
+            if (self->_daSession) {
+                DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, self->_daSession, bsd.UTF8String);
+                if (disk) {
+                    DADiskUnmount(disk, kDADiskUnmountOptionDefault, NULL, NULL);
+                    CFRelease(disk);
+                }
+            }
+        }
+
         NSString *mountPoint = targetPath;
         if (!mountPoint || mountPoint.length == 0) {
-            mountPoint = [NSString stringWithFormat:@"/Volumes/%@", bsd];
+            NSString *vName = rawDesc[(NSString *)kDADiskDescriptionVolumeNameKey];
+            if (vName && vName.length > 0) {
+                mountPoint = [NSString stringWithFormat:@"/Volumes/%@", vName];
+            } else {
+                mountPoint = [NSString stringWithFormat:@"/Volumes/%@", bsd];
+            }
         }
 
         KTYMountedVolumeInfo *info = [[KTYMountedVolumeInfo alloc] init];
         info.bsdName = bsd;
         info.devicePath = [NSString stringWithFormat:@"/dev/%@", bsd];
         info.mountPoint = mountPoint;
-        info.volumeName = bsd;
+        info.volumeName = rawDesc[(NSString *)kDADiskDescriptionVolumeNameKey] ?: bsd;
         info.volumeUUID = [[NSUUID UUID] UUIDString];
         info.readOnly = readOnly;
         info.allowSystemMetadata = allowSystemMetadata;
@@ -504,6 +594,92 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
 
         [self.mountedVolumes removeObjectForKey:foundKey];
         reply(YES, nil);
+    }
+}
+
+- (void)getConfigWithReply:(void (^)(NSDictionary * _Nullable config, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        NSDictionary *cfg = @{
+            @"auto_mount_enabled": @(self.autoMountEnabled),
+            @"auto_mount_targets": [self.autoMountTargets copy] ?: @{},
+            @"preferences_path": KTYPreferencesFilePath
+        };
+        reply(cfg, nil);
+    }
+}
+
+- (void)setGlobalAutoMountEnabled:(BOOL)enabled
+                        withReply:(void (^)(BOOL success, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        self.autoMountEnabled = enabled;
+        [self savePreferences];
+        reply(YES, nil);
+    }
+}
+
+- (void)setAutoMountTarget:(NSString *)volumeTarget
+                   enabled:(BOOL)enabled
+                  readOnly:(BOOL)readOnly
+                 withReply:(void (^)(BOOL success, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!volumeTarget || volumeTarget.length == 0) {
+            reply(NO, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: @"Volume target required"}]);
+            return;
+        }
+
+        self.autoMountTargets[volumeTarget] = @{
+            @"target": volumeTarget,
+            @"enabled": @(enabled),
+            @"read_only": @(readOnly)
+        };
+        [self savePreferences];
+        reply(YES, nil);
+    }
+}
+
+- (void)checkSafetyForTarget:(NSString *)target
+                   withReply:(void (^)(NSDictionary * _Nullable report, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!target || target.length == 0) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: @"Target required"}]);
+            return;
+        }
+
+        NSString *bsd = [target stringByReplacingOccurrencesOfString:@"/dev/" withString:@""];
+        NSDictionary *rawDesc = self.detectedDisks[bsd];
+        NSString *checkTarget = target;
+        if (rawDesc && rawDesc[(NSString *)kDADiskDescriptionVolumePathKey]) {
+            NSURL *mUrl = rawDesc[(NSString *)kDADiskDescriptionVolumePathKey];
+            NSString *mPath = [mUrl respondsToSelector:@selector(path)] ? mUrl.path : [mUrl description];
+            if (mPath.length > 0) {
+                checkTarget = mPath;
+            }
+        }
+
+        kty_safety_report_t rep;
+        int rc = kty_check_volume_safety(checkTarget.UTF8String, &rep);
+        if (rc < 0) {
+            NSString *errMsg = [NSString stringWithUTF8String:rep.status_summary] ?: @"Safety check failed";
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:(errno != 0 ? errno : EIO) userInfo:@{NSLocalizedDescriptionKey: errMsg}]);
+            return;
+        }
+
+        char guidanceBuf[2048] = {0};
+        NSString *vName = rawDesc[(NSString *)kDADiskDescriptionVolumeNameKey] ?: target;
+        kty_format_fast_startup_guidance(vName.UTF8String, guidanceBuf, sizeof(guidanceBuf));
+
+        NSDictionary *res = @{
+            @"target": target,
+            @"volume_name": [NSString stringWithUTF8String:rep.volume_name] ?: @"",
+            @"has_hiberfile": @(rep.has_hiberfile),
+            @"is_hibernated": @(rep.is_hibernated),
+            @"is_dirty": @(rep.is_dirty),
+            @"metadata_cached": @(rep.metadata_cached),
+            @"safe_for_write": @(rep.safe_for_write),
+            @"status_summary": [NSString stringWithUTF8String:rep.status_summary] ?: @"",
+            @"guidance": [NSString stringWithUTF8String:guidanceBuf] ?: @""
+        };
+        reply(res, nil);
     }
 }
 

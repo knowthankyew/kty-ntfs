@@ -29,10 +29,10 @@ LIB_DIR = $(BUILD_DIR)/lib
 OBJ_DIR = $(BUILD_DIR)/obj
 
 CORE_VENDOR_SRCS = $(wildcard src/core/vendor/libntfs-3g/*.c)
-CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c src/core/kty_crypto.c
+CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c src/core/kty_crypto.c src/core/kty_safety.c
 
-CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o $(OBJ_DIR)/arm64/kty_crypto.o
-CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o $(OBJ_DIR)/x86_64/kty_crypto.o
+CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o $(OBJ_DIR)/arm64/kty_crypto.o $(OBJ_DIR)/arm64/kty_safety.o
+CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o $(OBJ_DIR)/x86_64/kty_crypto.o $(OBJ_DIR)/x86_64/kty_safety.o
 
 FSKIT_SRCS = src/fskit/KTYItem.m src/fskit/KTYVolume.m src/fskit/KTYUnaryFileSystem.m
 FSKIT_OBJS_ARM64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/arm64/fskit/%.o,$(FSKIT_SRCS))
@@ -71,11 +71,19 @@ $(OBJ_DIR)/arm64/kty_crypto.o: src/core/kty_crypto.c | $(OBJ_DIR)/arm64/vendor
 	@echo "==> Compiling arm64: $<"
 	$(CC) $(CFLAGS_ARM64) -c $< -o $@
 
+$(OBJ_DIR)/arm64/kty_safety.o: src/core/kty_safety.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64: $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
 $(OBJ_DIR)/x86_64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 
 $(OBJ_DIR)/x86_64/kty_crypto.o: src/core/kty_crypto.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64: $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/kty_safety.o: src/core/kty_safety.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 
@@ -132,11 +140,11 @@ $(OBJ_DIR)/x86_64/test_ntfs_core.o: tests/test_ntfs_core.c | $(OBJ_DIR)/x86_64/v
 
 $(BIN_DIR)/test_ntfs_core_arm64: $(OBJ_DIR)/arm64/test_ntfs_core.o $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
 	@echo "==> Linking arm64 test binary: $@"
-	$(CC) $(CFLAGS_ARM64) $^ -o $@
+	$(CC) $(CFLAGS_ARM64) $^ -framework CoreFoundation -o $@
 
 $(BIN_DIR)/test_ntfs_core_x86_64: $(OBJ_DIR)/x86_64/test_ntfs_core.o $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
 	@echo "==> Linking x86_64 test binary: $@"
-	$(CC) $(CFLAGS_X86_64) $^ -o $@
+	$(CC) $(CFLAGS_X86_64) $^ -framework CoreFoundation -o $@
 
 $(BIN_DIR)/test_ntfs_core: $(BIN_DIR)/test_ntfs_core_arm64 $(BIN_DIR)/test_ntfs_core_x86_64 | $(BIN_DIR)
 	@echo "==> Creating universal test binary: $@"
@@ -245,11 +253,11 @@ $(OBJ_DIR)/x86_64/cli/%.o: src/cli/%.m | $(OBJ_DIR)/x86_64/cli
 	@echo "==> Compiling x86_64 (cli): $<"
 	$(CC) $(OBJCFLAGS_X86_64) -c $< -o $@
 
-$(BIN_DIR)/kty-ntfs_arm64: $(CLI_OBJS_ARM64) | $(BIN_DIR)
+$(BIN_DIR)/kty-ntfs_arm64: $(CLI_OBJS_ARM64) $(LIB_DIR)/arm64/libkty_ntfs_core.a | $(BIN_DIR)
 	@echo "==> Linking arm64 CLI binary: $@"
 	$(CC) $(OBJCFLAGS_ARM64) $^ $(DA_FRAMEWORKS) -o $@
 
-$(BIN_DIR)/kty-ntfs_x86_64: $(CLI_OBJS_X86_64) | $(BIN_DIR)
+$(BIN_DIR)/kty-ntfs_x86_64: $(CLI_OBJS_X86_64) $(LIB_DIR)/x86_64/libkty_ntfs_core.a | $(BIN_DIR)
 	@echo "==> Linking x86_64 CLI binary: $@"
 	$(CC) $(OBJCFLAGS_X86_64) $^ $(DA_FRAMEWORKS) -o $@
 
