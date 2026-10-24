@@ -161,9 +161,11 @@ kty-ntfs list
 ```
 Example Output:
 ```text
-IDENTIFIER     VOLUME NAME          CAPACITY     STATUS       HYGIENE MODE
-----------------------------------------------------------------------------------
-disk4s1        EVIDENCE_01          64.0 GB      Mounted      STRICT (Clean)
+IDENTIFIER   VOLUME NAME          FS TYPE      CAPACITY   STATUS       HYGIENE MODE
+----------------------------------------------------------------------------------------------------
+disk0s4      BOOTCAMP             NTFS         238.0 GB   Mounted      OS Default
+disk1s1      Macintosh HD - Data  APFS         692.7 GB   Mounted      OS Default
+disk4s1      EVIDENCE_01          NTFS         64.0 GB    Mounted      STRICT (Clean)
 ```
 
 JSON output:

@@ -11,9 +11,12 @@
     dict[@"mount_point"] = self.mountPoint ?: @"";
     dict[@"volume_name"] = self.volumeName ?: @"";
     dict[@"volume_uuid"] = self.volumeUUID ?: @"";
+    dict[@"volume_type"] = self.volumeType ?: @"NTFS";
+    dict[@"fs_type"] = self.volumeType ?: @"NTFS";
     dict[@"read_only"] = @(self.readOnly);
     dict[@"allow_system_metadata"] = @(self.allowSystemMetadata);
     dict[@"mount_time"] = @((uint64_t)self.mountTime);
+    dict[@"kty_managed"] = @YES;
     if (self.ktyVolume) {
         dict[@"is_dirty"] = @(self.ktyVolume.isDirty);
         dict[@"total_bytes_written"] = @(self.ktyVolume.totalBytesWritten);
@@ -304,14 +307,76 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
     }
 }
 
+static NSString *KTYDetermineFileSystemType(NSDictionary *desc) {
+    if (!desc) return @"-";
+
+    NSString *vType = desc[(NSString *)kDADiskDescriptionVolumeTypeKey];
+    if (vType && vType.length > 0) {
+        return [vType uppercaseString];
+    }
+
+    NSString *vKind = desc[(NSString *)kDADiskDescriptionVolumeKindKey];
+    if (vKind && vKind.length > 0) {
+        if ([vKind.lowercaseString isEqualToString:@"ntfs"]) return @"NTFS";
+        if ([vKind.lowercaseString isEqualToString:@"apfs"]) return @"APFS";
+        if ([vKind.lowercaseString isEqualToString:@"hfs"] || [vKind.lowercaseString isEqualToString:@"hfsplus"]) return @"HFS+";
+        if ([vKind.lowercaseString isEqualToString:@"msdos"] || [vKind.lowercaseString isEqualToString:@"fat32"]) return @"FAT32";
+        if ([vKind.lowercaseString isEqualToString:@"exfat"]) return @"ExFAT";
+        return [vKind uppercaseString];
+    }
+
+    NSString *content = desc[(NSString *)kDADiskDescriptionMediaContentKey];
+    if (content && content.length > 0) {
+        NSString *uContent = [content uppercaseString];
+        if ([uContent isEqualToString:@"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"] ||
+            [uContent containsString:@"NTFS"] ||
+            [uContent isEqualToString:@"MICROSOFT BASIC DATA"]) {
+            return @"NTFS";
+        }
+        if ([uContent isEqualToString:@"41504653-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent isEqualToString:@"7C3457EF-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent isEqualToString:@"EF57347C-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent containsString:@"APFS"]) {
+            return @"APFS";
+        }
+        if ([uContent isEqualToString:@"APPLE_HFS"] || [uContent containsString:@"HFS"]) {
+            return @"HFS+";
+        }
+        if ([uContent isEqualToString:@"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"] ||
+            [uContent containsString:@"EFI"]) {
+            return @"FAT32";
+        }
+        if ([uContent isEqualToString:@"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"] ||
+            [uContent containsString:@"RECOVERY"]) {
+            return @"Recovery";
+        }
+        if ([uContent isEqualToString:@"E3C9E316-0B5C-4DB8-817D-F92DF00215AE"] ||
+            [uContent isEqualToString:@"E3C9E310-0B5E-4965-97B1-3D21465175A6"] ||
+            [uContent containsString:@"MICROSOFT RESERVED"]) {
+            return @"MSR";
+        }
+        if ([uContent isEqualToString:@"GUID_PARTITION_SCHEME"]) {
+            return @"Partition";
+        }
+        if (content.length > 12) {
+            return @"Other";
+        }
+        return content;
+    }
+
+    return @"-";
+}
+
 - (void)listDisksWithReply:(void (^)(NSArray<NSDictionary *> * _Nullable disks, NSError * _Nullable error))reply {
     @synchronized (self) {
         NSMutableArray<NSDictionary *> *list = [NSMutableArray array];
 
-        /* Include currently mounted volumes */
+        /* Include currently mounted volumes (managed by kty-ntfs) */
         for (KTYMountedVolumeInfo *info in self.mountedVolumes.allValues) {
             NSMutableDictionary *d = [[info toDictionary] mutableCopy];
             d[@"is_mounted"] = @YES;
+            d[@"kty_managed"] = @YES;
+            d[@"fs_type"] = info.volumeType ?: @"NTFS";
             if (self.detectedDisks[info.bsdName]) {
                 NSDictionary *rawDesc = self.detectedDisks[info.bsdName];
                 if (rawDesc[(NSString *)kDADiskDescriptionMediaSizeKey]) {
@@ -321,21 +386,42 @@ static DADissenterRef KTYDiskMountApprovalCallback(DADiskRef disk, void *context
             [list addObject:d];
         }
 
-        /* Include detected unmounted disks */
+        /* Include detected unmounted or OS-mounted disks */
         for (NSString *bsd in self.detectedDisks) {
             if (self.mountedVolumes[bsd]) continue;
             NSDictionary *rawDesc = self.detectedDisks[bsd];
             NSMutableDictionary *d = [NSMutableDictionary dictionary];
             d[@"bsd_name"] = bsd;
             d[@"device_node"] = [NSString stringWithFormat:@"/dev/%@", bsd];
-            d[@"is_mounted"] = @NO;
             d[@"volume_name"] = rawDesc[(NSString *)kDADiskDescriptionVolumeNameKey] ?: @"";
             d[@"media_size"] = rawDesc[(NSString *)kDADiskDescriptionMediaSizeKey] ?: @0;
             d[@"volume_uuid"] = rawDesc[(NSString *)kDADiskDescriptionMediaUUIDKey] ? [rawDesc[(NSString *)kDADiskDescriptionMediaUUIDKey] description] : @"";
+            
+            NSString *fsType = KTYDetermineFileSystemType(rawDesc);
+            d[@"fs_type"] = fsType;
+            d[@"volume_type"] = fsType;
+
+            BOOL isMounted = (rawDesc[(NSString *)kDADiskDescriptionVolumePathKey] != nil);
+            d[@"is_mounted"] = @(isMounted);
+            d[@"kty_managed"] = @NO;
+            if (isMounted) {
+                NSURL *pathURL = rawDesc[(NSString *)kDADiskDescriptionVolumePathKey];
+                d[@"mount_point"] = [pathURL respondsToSelector:@selector(path)] ? pathURL.path : [pathURL description];
+            } else {
+                d[@"mount_point"] = @"";
+            }
+
             d[@"read_only"] = @NO;
             d[@"allow_system_metadata"] = @NO;
             [list addObject:d];
         }
+
+        /* Sort consistently by BSD device name (e.g. disk0, disk0s1, disk0s2, disk1, disk1s1...) */
+        [list sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            NSString *bsdA = a[@"bsd_name"] ?: @"";
+            NSString *bsdB = b[@"bsd_name"] ?: @"";
+            return [bsdA localizedStandardCompare:bsdB];
+        }];
 
         reply(list, nil);
     }

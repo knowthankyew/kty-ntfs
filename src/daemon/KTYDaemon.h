@@ -12,6 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *mountPoint;
 @property (nonatomic, copy) NSString *volumeName;
 @property (nonatomic, copy) NSString *volumeUUID;
+@property (nonatomic, copy, nullable) NSString *volumeType;
 @property (nonatomic, assign) BOOL readOnly;
 @property (nonatomic, assign) BOOL allowSystemMetadata;
 @property (nonatomic, strong, nullable) KTYVolume *ktyVolume;

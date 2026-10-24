@@ -81,6 +81,66 @@ static int CommandStatus(BOOL jsonOutput) {
     return exitCode;
 }
 
+static NSString *KTYExtractFSTypeFromDiskDesc(NSDictionary *desc) {
+    if (!desc) return @"-";
+
+    NSString *vType = desc[(NSString *)kDADiskDescriptionVolumeTypeKey];
+    if (vType && vType.length > 0) {
+        return [vType uppercaseString];
+    }
+
+    NSString *vKind = desc[(NSString *)kDADiskDescriptionVolumeKindKey];
+    if (vKind && vKind.length > 0) {
+        if ([vKind.lowercaseString isEqualToString:@"ntfs"]) return @"NTFS";
+        if ([vKind.lowercaseString isEqualToString:@"apfs"]) return @"APFS";
+        if ([vKind.lowercaseString isEqualToString:@"hfs"] || [vKind.lowercaseString isEqualToString:@"hfsplus"]) return @"HFS+";
+        if ([vKind.lowercaseString isEqualToString:@"msdos"] || [vKind.lowercaseString isEqualToString:@"fat32"]) return @"FAT32";
+        if ([vKind.lowercaseString isEqualToString:@"exfat"]) return @"ExFAT";
+        return [vKind uppercaseString];
+    }
+
+    NSString *content = desc[(NSString *)kDADiskDescriptionMediaContentKey];
+    if (content && content.length > 0) {
+        NSString *uContent = [content uppercaseString];
+        if ([uContent isEqualToString:@"EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"] ||
+            [uContent containsString:@"NTFS"] ||
+            [uContent isEqualToString:@"MICROSOFT BASIC DATA"]) {
+            return @"NTFS";
+        }
+        if ([uContent isEqualToString:@"41504653-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent isEqualToString:@"7C3457EF-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent isEqualToString:@"EF57347C-0000-11AA-AA11-00306543ECAC"] ||
+            [uContent containsString:@"APFS"]) {
+            return @"APFS";
+        }
+        if ([uContent isEqualToString:@"APPLE_HFS"] || [uContent containsString:@"HFS"]) {
+            return @"HFS+";
+        }
+        if ([uContent isEqualToString:@"C12A7328-F81F-11D2-BA4B-00A0C93EC93B"] ||
+            [uContent containsString:@"EFI"]) {
+            return @"FAT32";
+        }
+        if ([uContent isEqualToString:@"DE94BBA4-06D1-4D40-A16A-BFD50179D6AC"] ||
+            [uContent containsString:@"RECOVERY"]) {
+            return @"Recovery";
+        }
+        if ([uContent isEqualToString:@"E3C9E316-0B5C-4DB8-817D-F92DF00215AE"] ||
+            [uContent isEqualToString:@"E3C9E310-0B5E-4965-97B1-3D21465175A6"] ||
+            [uContent containsString:@"MICROSOFT RESERVED"]) {
+            return @"MSR";
+        }
+        if ([uContent isEqualToString:@"GUID_PARTITION_SCHEME"]) {
+            return @"Partition";
+        }
+        if (content.length > 12) {
+            return @"Other";
+        }
+        return content;
+    }
+
+    return @"-";
+}
+
 static int CommandList(BOOL jsonOutput) {
     NSXPCConnection *conn = GetDaemonConnection();
     __block int exitCode = 0;
@@ -101,28 +161,69 @@ static int CommandList(BOOL jsonOutput) {
     [proxy listDisksWithReply:^(NSArray<NSDictionary *> * _Nullable disks, NSError * _Nullable error) {
         if (!error && disks) {
             receivedReply = YES;
+            NSArray<NSDictionary *> *sortedDisks = [disks sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                NSString *bsdA = a[@"bsd_name"] ?: @"";
+                NSString *bsdB = b[@"bsd_name"] ?: @"";
+                return [bsdA localizedStandardCompare:bsdB];
+            }];
+
+            NSMutableArray<NSDictionary *> *enrichedDisks = [NSMutableArray array];
+            for (NSDictionary *d in sortedDisks) {
+                NSMutableDictionary *mut = [d mutableCopy];
+                NSString *fsType = mut[@"fs_type"] ?: mut[@"volume_type"];
+                if (!fsType || [fsType isEqualToString:@"-"] || [fsType isEqualToString:@"Unknown"]) {
+                    NSString *bsd = mut[@"bsd_name"];
+                    if (bsd && bsd.length > 0) {
+                        DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+                        if (session) {
+                            NSString *devPath = [NSString stringWithFormat:@"/dev/%@", bsd];
+                            DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, devPath.UTF8String);
+                            if (disk) {
+                                CFDictionaryRef desc = DADiskCopyDescription(disk);
+                                if (desc) {
+                                    fsType = KTYExtractFSTypeFromDiskDesc((__bridge NSDictionary *)desc);
+                                    CFRelease(desc);
+                                }
+                                CFRelease(disk);
+                            }
+                            CFRelease(session);
+                        }
+                    }
+                }
+                if (!fsType || fsType.length == 0) {
+                    fsType = @"-";
+                }
+                mut[@"fs_type"] = fsType;
+                mut[@"volume_type"] = fsType;
+                [enrichedDisks addObject:mut];
+            }
+
             if (jsonOutput) {
-                NSData *data = [NSJSONSerialization dataWithJSONObject:disks options:NSJSONWritingPrettyPrinted error:nil];
+                NSData *data = [NSJSONSerialization dataWithJSONObject:enrichedDisks options:NSJSONWritingPrettyPrinted error:nil];
                 printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
             } else {
-                printf("%-14s %-20s %-12s %-12s %-20s\n", "IDENTIFIER", "VOLUME NAME", "CAPACITY", "STATUS", "HYGIENE MODE");
-                printf("----------------------------------------------------------------------------------\n");
-                if (disks.count == 0) {
-                    printf("No NTFS storage devices attached.\n");
+                printf("%-12s %-20s %-12s %-10s %-12s %-20s\n", "IDENTIFIER", "VOLUME NAME", "FS TYPE", "CAPACITY", "STATUS", "HYGIENE MODE");
+                printf("----------------------------------------------------------------------------------------------------\n");
+                if (enrichedDisks.count == 0) {
+                    printf("No storage devices detected.\n");
                 }
-                for (NSDictionary *d in disks) {
+                for (NSDictionary *d in enrichedDisks) {
                     NSString *bsd = d[@"bsd_name"] ?: @"-";
-                    NSString *name = d[@"volume_name"] ?: @"-";
+                    NSString *name = d[@"volume_name"];
+                    if (!name || name.length == 0) name = @"-";
+                    NSString *fsType = d[@"fs_type"] ?: @"-";
                     uint64_t size = [d[@"media_size"] unsignedLongLongValue];
                     NSString *sizeStr = (size > 0) ? [NSString stringWithFormat:@"%.1f GB", (double)size / (1024.0 * 1024.0 * 1024.0)] : @"-";
                     BOOL mounted = [d[@"is_mounted"] boolValue];
+                    BOOL ktyManaged = [d[@"kty_managed"] boolValue];
                     NSString *status = mounted ? @"Mounted" : @"Unmounted";
                     BOOL allowMeta = [d[@"allow_system_metadata"] boolValue];
-                    NSString *hygiene = mounted ? (allowMeta ? @"DIRTY (--allow)" : @"STRICT (Clean)") : @"-";
+                    NSString *hygiene = mounted ? (ktyManaged ? (allowMeta ? @"DIRTY (--allow)" : @"STRICT (Clean)") : @"OS Default") : @"-";
 
-                    printf("%-14s %-20s %-12s %-12s %-20s\n",
+                    printf("%-12s %-20s %-12s %-10s %-12s %-20s\n",
                            bsd.UTF8String,
                            name.UTF8String,
+                           fsType.UTF8String,
                            sizeStr.UTF8String,
                            status.UTF8String,
                            hygiene.UTF8String);
