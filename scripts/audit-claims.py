@@ -123,6 +123,13 @@ def check_licensing_and_portfolio_claims(root: Path, errors: list[str]) -> None:
         if "MIT License" not in notice_text:
             fail(errors, "NOTICE.md must document the portfolio MIT distinction")
 
+    bom_text = read_text_checked(root, "bom.json", errors)
+    if bom_text is not None:
+        if "CycloneDX" not in bom_text:
+            fail(errors, "bom.json must be a CycloneDX formatted SBOM")
+        if "kty-ntfs" not in bom_text:
+            fail(errors, "bom.json must declare kty-ntfs component")
+
 
 FORBIDDEN_EGRESS_PATTERNS = [
     (r"\bimport\s+Network\b", "import Network"),

@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build, Audit, Test & Attest (macOS)
+    runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Verify Zero-Egress & Claims Parity Gate (Pre-Build)
+        run: python3 ./scripts/audit-claims.py
+
+      - name: Compile Universal Binaries
+        run: make all
+
+      - name: Run Test Suite (Core, FSKit Bridge, Daemon/CLI, Torture)
+        run: make test
+
+      - name: Run AddressSanitizer & UndefinedBehaviorSanitizer Matrix
+        run: make asan
+
+      - name: Rebuild Clean Production Release Artifacts
+        run: |
+          make clean
+          make all
+
+      - name: Verify Zero Network Symbols Invariant (Post-Build)
+        run: make verify-invariants
+
+      - name: Verify Final Claims Parity & CycloneDX SBOM
+        run: python3 ./scripts/audit-claims.py
+
+      - name: Package Release Bundle & Checksums
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/bin/kty-ntfs-menu.app dist/kty-ntfs-menu-v0.1.0.zip
+          ditto -c -k --sequesterRsrc --keepParent build/bin/kty-ntfs-fs.appex dist/kty-ntfs-fs-v0.1.0.zip
+          cp build/bin/kty-ntfs dist/kty-ntfs
+          cp build/bin/kty-ntfsd dist/kty-ntfsd
+          cp bom.json dist/bom.json
+          cd dist
+          shasum -a 256 kty-ntfs kty-ntfsd kty-ntfs-menu-v0.1.0.zip kty-ntfs-fs-v0.1.0.zip bom.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest Build Provenance (SLSA)
+        uses: actions/attest-build-provenance@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          subject-path: |
+            bom.json
+            dist/SHA256SUMS
+            dist/kty-ntfs-menu-v0.1.0.zip
+            dist/kty-ntfs-fs-v0.1.0.zip
+
+      - name: Upload Build & SBOM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kty-ntfs-release-bundle
+          path: |
+            bom.json
+            dist/SHA256SUMS
+            dist/kty-ntfs
+            dist/kty-ntfsd
+            dist/kty-ntfs-menu-v0.1.0.zip
+            dist/kty-ntfs-fs-v0.1.0.zip

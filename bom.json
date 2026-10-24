@@ -1,0 +1,132 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-24T14:15:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "publisher": "knowthankyew",
+          "name": "generate-sbom",
+          "version": "1.0.0"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:generic/kty-ntfs@0.1.0",
+      "name": "kty-ntfs",
+      "version": "0.1.0",
+      "description": "Native user-space NTFS storage engine, companion CLI, and menu bar companion for macOS 14+ with zero network egress.",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "knowthankyew:privacy:network_egress",
+          "value": "deny"
+        },
+        {
+          "name": "knowthankyew:privacy:telemetry_mode",
+          "value": "disabled"
+        },
+        {
+          "name": "knowthankyew:privacy:cloud_upload",
+          "value": "false"
+        },
+        {
+          "name": "knowthankyew:privacy:third_party_dependencies",
+          "value": "0"
+        },
+        {
+          "name": "knowthankyew:security:kernel_extensions",
+          "value": "0"
+        },
+        {
+          "name": "knowthankyew:forensics:hygiene_mode",
+          "value": "strict"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:generic/kty-ntfs-core@0.1.0",
+      "name": "libkty_ntfs_core",
+      "version": "0.1.0",
+      "description": "Headless NTFS core engine and safety validator linking libntfs-3g",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/kty-ntfsd@0.1.0",
+      "name": "kty-ntfsd",
+      "version": "0.1.0",
+      "description": "Autonomous launchd background daemon and DiskArbitration arbiter",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/kty-ntfs@0.1.0",
+      "name": "kty-ntfs",
+      "version": "0.1.0",
+      "description": "Companion command-line utility for NTFS partition mounting, safety inspection, and direct file transfer",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/kty-ntfs-menu@0.1.0",
+      "name": "kty-ntfs-menu",
+      "version": "0.1.0",
+      "description": "Native macOS AppKit Menu Bar UI companion application",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/kty-ntfs-fs@0.1.0",
+      "name": "kty-ntfs-fs.appex",
+      "version": "0.1.0",
+      "description": "Apple FSKit App Extension file system module",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-or-later"
+          }
+        }
+      ]
+    }
+  ]
+}
