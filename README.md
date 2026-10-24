@@ -28,13 +28,15 @@ Part of the **knowthankyew** portfolio.
 | **Torture & Stress Harness** | **Ready** | High-throughput stress harness (`make torture`) and Windows 11 cross-platform suite (`verify-windows.ps1`). |
 | **Packaging & Installation** | **Ready** | Standalone installer (`sudo make install`) and Homebrew formula (`Formula/kty-ntfs.rb`). |
 | **Local Self-Signing & Ad-Hoc** | **Ready** | Automated cert generation (`scripts/create-self-signed-cert.sh`) and ad-hoc runtime signing. |
-| **Apple Developer ID & Notarization** | **Phase 8** | Scheduled for Phase 8 following Apple Developer Program enrollment. |
+| **Direct Headless / CLI Operations** | **Ready** | Claim, inspect, hash, verify Fast Startup, and manage NTFS volumes without SIP alterations. |
+| **Apple Developer ID & Finder VFS** | **Phase 8** | Required by Apple's `fskitd` to publish mount points into `/Volumes` and Finder GUI. |
+| **Menu Bar UI Companion (`kty-ntfs-menu`)** | **Phase 9** | Native macOS status bar application with live volume cards and auto-mount toggles. |
 
-> [!NOTE]
+> [!IMPORTANT]
 > **Ad-Hoc / Self-Signed vs. System-Wide Finder Integration:**  
-> On macOS 14+ (Sonoma) and macOS 15+ (Sequoia), Apple's `fskitd` daemon requires an official Apple Developer ID certificate carrying the restricted `com.apple.developer.fskit.fsmodule` entitlement for Finder auto-mounting (or SIP disabled in Recovery via `csrutil disable`).  
+> On macOS 14+ (Sonoma) and macOS 15+ (Sequoia), Apple's `fskitd` daemon enforces a strict security boundary: third-party file system extensions (`.appex`) are only permitted to attach virtual file system mount points into the macOS kernel VFS (making them visible at `/Volumes` in the Finder GUI) if they are signed with an official Apple Developer ID certificate carrying the restricted `com.apple.developer.fskit.fsmodule` entitlement (or if System Integrity Protection is disabled via `csrutil disable`).
 > 
-> `kty-ntfs` operates locally using **local ad-hoc codesigning** (default) or **self-signed certificates**. You can fully run, install, test, mount, unmount, and benchmark the daemon, CLI, cryptographic engine, and filesystem bridge immediately without modifying macOS security policies. Official Apple Developer ID signing and Mac App Store packaging are scheduled for Phase 8.
+> In the current **Phase 7** release (self-signed / ad-hoc), `kty-ntfs` operates autonomously via `kty-ntfsd` and `kty-ntfs`. When `kty-ntfs` claims a drive, it unmounts Apple's default read-only kernel driver. Because Apple's `fskitd` blocks self-signed extensions from publishing VFS mount points, the volume does not appear in Finder under self-signed mode without SIP modification. System-wide Finder VFS publishing will be fully active upon Phase 8 Apple Developer ID enrollment.
 
 ---
 

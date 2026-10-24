@@ -118,17 +118,34 @@ This roadmap outlines the phased development of `kty-ntfs`, taking it from an is
 
 ---
 
-## Phase 8: Apple Developer Account Registration, Notarization & Distribution (Future)
+## Phase 8: Apple Developer Account Registration, Entitlements & System VFS Mounting
 - [ ] **Apple Developer Program Enrollment:**
   - Register Apple Developer Program account and acquire Team ID.
   - Generate official Apple Developer ID Application code signing certificates.
-- [ ] **Restricted Entitlement Provisioning:**
+- [ ] **Restricted Entitlement Provisioning (`com.apple.developer.fskit.fsmodule`):**
   - Submit request and secure Apple authorization for the restricted `com.apple.developer.fskit.fsmodule` entitlement.
-  - Integrate provisioning profiles into CI/CD release build pipeline.
+  - **Finder GUI Mount Enablement**: On macOS 14+ (Sonoma) and macOS 15+ (Sequoia), Apple's `fskitd` requires this entitlement to publish third-party file system mount points into `/Volumes` and Finder. Without this entitlement, self-signed/ad-hoc builds cannot mount into the macOS kernel VFS unless System Integrity Protection (SIP) is disabled (`csrutil disable`).
+  - Integrate Apple provisioning profiles into release build pipeline.
 - [ ] **Automated Notarization Pipeline:**
   - Configure automated Apple Notarization pipeline (`xcrun notarytool` / `stapler`).
   - Strict hardened runtime verification without ad-hoc overrides.
 - [ ] **Distribution Packaging:**
   - Create signed and notarized `.pkg` / `.dmg` installers for end-user distribution.
   - Provide official signed Homebrew Cask tap and explore Mac App Store submission.
+
+---
+
+## Phase 9: Native macOS Menu Bar UI Companion (`kty-ntfs-menu`)
+- [ ] **Native AppKit / SwiftUI Status Bar Application:**
+  - Lightweight menu bar extra (`kty-ntfs-menu.app`) living in the macOS status bar.
+  - Real-time disk inventory querying `com.knowthankyew.ntfsd` over XPC.
+  - Per-volume cards showing capacity, status, and forensic hygiene mode.
+- [ ] **Interactive Volume Selector & Auto-Mount Toggles:**
+  - Checkbox per detected volume: `[✓] Auto-Mount with Write Support`.
+  - Persists configuration directly to `/Library/Preferences/com.knowthankyew.ntfsd.plist`.
+  - Manual "Mount Read/Write", "Mount Read-Only", and "Unmount" action buttons.
+- [ ] **Visual Fast Startup Safety Diagnostics & Guidance:**
+  - Visual status badges: 🟢 Clean (Fast Startup Inactive) vs. ⚠️ Fast Startup Active.
+  - Interactive diagnostic sheet displaying step-by-step Windows Control Panel instructions, `powercfg /h off` copy button, and cold restart shortcuts when Fast Startup is detected.
+
 
