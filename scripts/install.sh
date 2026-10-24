@@ -35,8 +35,10 @@ echo ""
 CLI_BIN="$REPO_ROOT/build/bin/kty-ntfs"
 DAEMON_BIN="$REPO_ROOT/build/bin/kty-ntfsd"
 APPEX_BUNDLE="$REPO_ROOT/build/bin/kty-ntfs-fs.appex"
+MENU_BUNDLE="$REPO_ROOT/build/bin/kty-ntfs-menu.app"
+APP_DIR="/Applications"
 
-if [[ ! -f "$CLI_BIN" || ! -f "$DAEMON_BIN" || ! -d "$APPEX_BUNDLE" ]]; then
+if [[ ! -f "$CLI_BIN" || ! -f "$DAEMON_BIN" || ! -d "$APPEX_BUNDLE" || ! -d "$MENU_BUNDLE" ]]; then
     echo "[install] Release binaries not found. Building with make all..."
     if [[ -n "${SUDO_USER:-}" ]]; then
         sudo -u "$SUDO_USER" make -C "$REPO_ROOT" all
@@ -50,6 +52,7 @@ echo "[install] Verifying code signatures of built artifacts..."
 codesign --verify --verbose "$CLI_BIN"
 codesign --verify --verbose "$DAEMON_BIN"
 codesign --verify --verbose "$APPEX_BUNDLE"
+codesign --verify --verbose "$MENU_BUNDLE"
 
 # 3. Create destination directories
 echo "[install] Creating target directories..."
@@ -73,6 +76,13 @@ rm -rf "$APPEX_DIR/kty-ntfs-fs.appex"
 cp -R "$APPEX_BUNDLE" "$APPEX_DIR/kty-ntfs-fs.appex"
 chown -R root:wheel "$APPEX_DIR/kty-ntfs-fs.appex"
 chmod -R 755 "$APPEX_DIR/kty-ntfs-fs.appex"
+
+# 7. Install Menu Bar UI Companion App
+echo "[install] Installing Menu Bar UI companion to $APP_DIR..."
+rm -rf "$APP_DIR/kty-ntfs-menu.app"
+cp -R "$MENU_BUNDLE" "$APP_DIR/kty-ntfs-menu.app"
+chown -R root:wheel "$APP_DIR/kty-ntfs-menu.app"
+chmod -R 755 "$APP_DIR/kty-ntfs-menu.app"
 
 # 7. Configure and install LaunchDaemon plist
 echo "[install] Installing LaunchDaemon service definition..."

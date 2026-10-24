@@ -4,6 +4,7 @@
 #import <sys/mount.h>
 #import <unistd.h>
 #include "kty_safety.h"
+#include "kty_transfer.h"
 
 @implementation KTYMountedVolumeInfo
 
@@ -91,6 +92,7 @@ static NSString * const KTYPreferencesFilePath = @"/Library/Preferences/com.know
 }
 
 - (void)savePreferences {
+    if (!self.machServiceName) return;
     NSDictionary *dict = @{
         @"auto_mount_enabled": @(self.autoMountEnabled),
         @"auto_mount_targets": self.autoMountTargets ?: @{}
@@ -117,7 +119,9 @@ static NSString * const KTYPreferencesFilePath = @"/Library/Preferences/com.know
         _detectedDisks = [NSMutableDictionary dictionary];
         _autoMountTargets = [NSMutableDictionary dictionary];
         _daSession = NULL;
-        [self loadPreferences];
+        if (serviceName != nil) {
+            [self loadPreferences];
+        }
     }
     return self;
 }
@@ -678,6 +682,183 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
             @"safe_for_write": @(rep.safe_for_write),
             @"status_summary": [NSString stringWithUTF8String:rep.status_summary] ?: @"",
             @"guidance": [NSString stringWithUTF8String:guidanceBuf] ?: @""
+        };
+        reply(res, nil);
+    }
+}
+
+- (void)listDirectoryOnDevice:(NSString *)deviceBSDName
+                         path:(NSString *)path
+                    withReply:(void (^)(NSArray<NSDictionary *> * _Nullable entries, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!deviceBSDName || deviceBSDName.length == 0) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: @"Device name required"}]);
+            return;
+        }
+
+        NSString *devPath = nil;
+        NSString *bsd = nil;
+        if ([deviceBSDName hasPrefix:@"/"]) {
+            devPath = deviceBSDName;
+            if ([deviceBSDName hasPrefix:@"/dev/"]) {
+                bsd = [deviceBSDName substringFromIndex:5];
+            } else {
+                bsd = [deviceBSDName lastPathComponent];
+            }
+        } else {
+            bsd = deviceBSDName;
+            devPath = [NSString stringWithFormat:@"/dev/%@", bsd];
+        }
+
+        kty_dir_listing_t listing;
+        int rc = kty_transfer_list_dir(devPath.UTF8String, path.UTF8String ?: "/", &listing);
+        if (rc < 0) {
+            int err = -rc;
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:err userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithUTF8String:strerror(err)] ?: @"Directory listing failed"}]);
+            return;
+        }
+
+        NSMutableArray<NSDictionary *> *res = [NSMutableArray arrayWithCapacity:listing.count];
+        for (size_t i = 0; i < listing.count; i++) {
+            [res addObject:@{
+                @"name": [NSString stringWithUTF8String:listing.entries[i].name] ?: @"",
+                @"is_directory": @(listing.entries[i].is_directory),
+                @"size": @(listing.entries[i].size)
+            }];
+        }
+        kty_transfer_free_listing(&listing);
+        reply(res, nil);
+    }
+}
+
+- (void)copyFileToNTFS:(NSString *)deviceBSDName
+            sourcePath:(NSString *)sourcePath
+       destinationPath:(NSString *)destinationPath
+   allowSystemMetadata:(BOOL)allowSystemMetadata
+             withReply:(void (^)(NSDictionary * _Nullable result, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!deviceBSDName || !sourcePath || !destinationPath) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: @"Invalid arguments"}]);
+            return;
+        }
+
+        NSString *devPath = nil;
+        NSString *bsd = nil;
+        if ([deviceBSDName hasPrefix:@"/"]) {
+            devPath = deviceBSDName;
+            if ([deviceBSDName hasPrefix:@"/dev/"]) {
+                bsd = [deviceBSDName substringFromIndex:5];
+            } else {
+                bsd = [deviceBSDName lastPathComponent];
+            }
+        } else {
+            bsd = deviceBSDName;
+            devPath = [NSString stringWithFormat:@"/dev/%@", bsd];
+        }
+
+        /* Check Fast Startup safety */
+        kty_safety_report_t safety;
+        if (kty_check_volume_safety(devPath.UTF8String, &safety) == 0) {
+            if (!safety.safe_for_write || safety.is_hibernated || safety.metadata_cached || safety.is_dirty) {
+                char guidanceBuf[2048] = {0};
+                NSString *volName = self.detectedDisks[bsd][(NSString *)kDADiskDescriptionVolumeNameKey] ?: bsd;
+                kty_format_fast_startup_guidance(volName.UTF8String, guidanceBuf, sizeof(guidanceBuf));
+
+                NSDictionary *userInfo = @{
+                    NSLocalizedDescriptionKey: @"Windows Fast Startup is active. Write operation rejected to protect filesystem integrity.",
+                    @"KTYFastStartupActive": @YES,
+                    @"KTYGuidance": [NSString stringWithUTF8String:guidanceBuf] ?: @"",
+                    @"status_summary": [NSString stringWithUTF8String:safety.status_summary] ?: @""
+                };
+                reply(nil, [NSError errorWithDomain:@"com.knowthankyew.kty-ntfs.safety" code:EPERM userInfo:userInfo]);
+                return;
+            }
+        }
+
+        /* If macOS default driver has this device mounted read-only, safely unmount it before writing */
+        NSDictionary *rawDesc = self.detectedDisks[bsd];
+        if (rawDesc && rawDesc[(NSString *)kDADiskDescriptionVolumePathKey]) {
+            if (self->_daSession) {
+                DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, self->_daSession, bsd.UTF8String);
+                if (disk) {
+                    DADiskUnmount(disk, kDADiskUnmountOptionDefault, NULL, NULL);
+                    CFRelease(disk);
+                }
+            }
+        }
+
+        char sha256_hex[65] = {0};
+        char blake3_hex[65] = {0};
+        int rc = -EBUSY;
+        for (int attempt = 0; attempt < 15; attempt++) {
+            rc = kty_transfer_copy_to_ntfs(
+                devPath.UTF8String,
+                sourcePath.UTF8String,
+                destinationPath.UTF8String,
+                allowSystemMetadata,
+                sha256_hex,
+                blake3_hex
+            );
+            if (rc != -EBUSY) {
+                break;
+            }
+            usleep(100 * 1000); /* Wait 100ms for kernel unmount to release device locks */
+        }
+
+        if (rc < 0) {
+            int err = -rc;
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:err userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithUTF8String:strerror(err)] ?: @"File copy to NTFS failed"}]);
+            return;
+        }
+
+        NSDictionary *res = @{
+            @"device": bsd,
+            @"source": sourcePath,
+            @"destination": destinationPath,
+            @"sha256": [NSString stringWithUTF8String:sha256_hex] ?: @"",
+            @"blake3": [NSString stringWithUTF8String:blake3_hex] ?: @"",
+            @"status": @"success"
+        };
+        reply(res, nil);
+    }
+}
+
+- (void)copyFileFromNTFS:(NSString *)deviceBSDName
+              sourcePath:(NSString *)sourcePath
+         destinationPath:(NSString *)destinationPath
+               withReply:(void (^)(NSDictionary * _Nullable result, NSError * _Nullable error))reply {
+    @synchronized (self) {
+        if (!deviceBSDName || !sourcePath || !destinationPath) {
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:EINVAL userInfo:@{NSLocalizedDescriptionKey: @"Invalid arguments"}]);
+            return;
+        }
+
+        NSString *devPath = nil;
+        NSString *bsd = nil;
+        if ([deviceBSDName hasPrefix:@"/"]) {
+            devPath = deviceBSDName;
+            if ([deviceBSDName hasPrefix:@"/dev/"]) {
+                bsd = [deviceBSDName substringFromIndex:5];
+            } else {
+                bsd = [deviceBSDName lastPathComponent];
+            }
+        } else {
+            bsd = deviceBSDName;
+            devPath = [NSString stringWithFormat:@"/dev/%@", bsd];
+        }
+
+        int rc = kty_transfer_copy_from_ntfs(devPath.UTF8String, sourcePath.UTF8String, destinationPath.UTF8String);
+        if (rc < 0) {
+            int err = -rc;
+            reply(nil, [NSError errorWithDomain:NSPOSIXErrorDomain code:err userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithUTF8String:strerror(err)] ?: @"File copy from NTFS failed"}]);
+            return;
+        }
+
+        NSDictionary *res = @{
+            @"device": bsd,
+            @"source": sourcePath,
+            @"destination": destinationPath,
+            @"status": @"success"
         };
         reply(res, nil);
     }

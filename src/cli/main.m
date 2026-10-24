@@ -11,6 +11,8 @@ static void PrintHelp(void) {
     printf("  kty-ntfs unmount <target>                  Gracefully unmount a volume or device\n");
     printf("  kty-ntfs check <device-or-path> [--json]   Inspect volume for Windows Fast Startup safety\n");
     printf("  kty-ntfs config [options]                  Query or update auto-mount volume rules\n");
+    printf("  kty-ntfs ls <device>:[path] [--json]       List directory contents on an NTFS partition\n");
+    printf("  kty-ntfs cp <src> <dest> [options]         Copy file to/from NTFS directly (e.g. file.txt disk0s4:/)\n");
     printf("  kty-ntfs status [--json]                   Query kty-ntfsd daemon status & metrics\n");
     printf("  kty-ntfs help, --help, -h                  Show this help reference\n\n");
     printf("Mount Options:\n");
@@ -579,6 +581,178 @@ static int CommandConfig(BOOL jsonOutput, NSString *targetVolume, NSNumber *enab
     return exitCode;
 }
 
+static int CommandLS(NSString *targetWithDevice, BOOL jsonOutput) {
+    if (!targetWithDevice || targetWithDevice.length == 0) {
+        fprintf(stderr, "Error: Target required in format <device>:[path] (e.g. disk0s4:/ or disk0s4)\n");
+        return 1;
+    }
+
+    NSString *device = nil;
+    NSString *path = @"/";
+    NSRange colon = [targetWithDevice rangeOfString:@":"];
+    if (colon.location != NSNotFound) {
+        device = [targetWithDevice substringToIndex:colon.location];
+        path = [targetWithDevice substringFromIndex:colon.location + 1];
+        if (path.length == 0) path = @"/";
+    } else {
+        device = targetWithDevice;
+    }
+
+    device = [device stringByReplacingOccurrencesOfString:@"/dev/" withString:@""];
+
+    NSXPCConnection *conn = GetDaemonConnection();
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        if (jsonOutput) {
+            printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error.localizedDescription.UTF8String);
+        } else {
+            fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        }
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
+
+    [proxy listDirectoryOnDevice:device path:path withReply:^(NSArray<NSDictionary *> * _Nullable entries, NSError * _Nullable error) {
+        if (error || !entries) {
+            if (jsonOutput) {
+                printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error ? error.localizedDescription.UTF8String : "Directory listing failed");
+            } else {
+                fprintf(stderr, "Directory listing failed: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+            }
+            exitCode = 1;
+        } else {
+            if (jsonOutput) {
+                NSData *data = [NSJSONSerialization dataWithJSONObject:entries options:NSJSONWritingPrettyPrinted error:nil];
+                printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+            } else {
+                printf("Directory listing for %s:%s\n", device.UTF8String, path.UTF8String);
+                printf("%-10s %-12s %-30s\n", "TYPE", "SIZE", "NAME");
+                printf("------------------------------------------------------------\n");
+                for (NSDictionary *e in entries) {
+                    BOOL isDir = [e[@"is_directory"] boolValue];
+                    uint64_t size = [e[@"size"] unsignedLongLongValue];
+                    NSString *name = e[@"name"] ?: @"";
+                    printf("%-10s %-12llu %-30s\n",
+                           isDir ? "DIR" : "FILE",
+                           (unsigned long long)size,
+                           name.UTF8String);
+                }
+            }
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    [conn invalidate];
+    return exitCode;
+}
+
+static int CommandCP(NSString *src, NSString *dest, BOOL allowMetadata, BOOL jsonOutput) {
+    if (!src || !dest) {
+        fprintf(stderr, "Usage: kty-ntfs cp <source> <destination> [options]\n");
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  kty-ntfs cp local.txt disk0s4:/Users/Alice/Desktop/local.txt\n");
+        fprintf(stderr, "  kty-ntfs cp disk0s4:/Windows/notepad.exe ./notepad.exe\n");
+        return 1;
+    }
+
+    BOOL srcIsNTFS = ([src rangeOfString:@":"].location != NSNotFound);
+    BOOL destIsNTFS = ([dest rangeOfString:@":"].location != NSNotFound);
+
+    if (srcIsNTFS && destIsNTFS) {
+        fprintf(stderr, "Error: Cross-device NTFS-to-NTFS direct copy not supported; copy via host scratchpad.\n");
+        return 1;
+    }
+    if (!srcIsNTFS && !destIsNTFS) {
+        fprintf(stderr, "Error: One argument must specify an NTFS device target (e.g. disk0s4:/path)\n");
+        return 1;
+    }
+
+    NSXPCConnection *conn = GetDaemonConnection();
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id<KTYDaemonProtocol> proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError * _Nonnull error) {
+        if (jsonOutput) {
+            printf("{\"status\": \"error\", \"message\": \"%s\"}\n", error.localizedDescription.UTF8String);
+        } else {
+            fprintf(stderr, "Error connecting to daemon: %s\n", error.localizedDescription.UTF8String);
+        }
+        exitCode = 1;
+        dispatch_semaphore_signal(sem);
+    }];
+
+    if (destIsNTFS) {
+        /* Host -> NTFS */
+        NSRange colon = [dest rangeOfString:@":"];
+        NSString *device = [dest substringToIndex:colon.location];
+        NSString *destPath = [dest substringFromIndex:colon.location + 1];
+        if (destPath.length == 0) destPath = @"/";
+
+        device = [device stringByReplacingOccurrencesOfString:@"/dev/" withString:@""];
+        NSString *hostSrc = [src stringByStandardizingPath];
+
+        [proxy copyFileToNTFS:device
+                   sourcePath:hostSrc
+              destinationPath:destPath
+          allowSystemMetadata:allowMetadata
+                    withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
+            if (error || !result) {
+                if (error.userInfo[@"KTYGuidance"]) {
+                    printf("\n%s\n", [error.userInfo[@"KTYGuidance"] UTF8String]);
+                } else {
+                    fprintf(stderr, "Copy failed: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+                }
+                exitCode = 1;
+            } else {
+                if (jsonOutput) {
+                    NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil];
+                    printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+                } else {
+                    printf("==> Successfully transferred file to NTFS volume (%s):\n", device.UTF8String);
+                    printf("    Destination: %s\n", [result[@"destination"] UTF8String]);
+                    printf("    SHA-256:     %s\n", [result[@"sha256"] UTF8String]);
+                    printf("    BLAKE3:      %s\n", [result[@"blake3"] UTF8String]);
+                    printf("    ADS Streams: Recorded & Verified (kty.integrity.*)\n");
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    } else {
+        /* NTFS -> Host */
+        NSRange colon = [src rangeOfString:@":"];
+        NSString *device = [src substringToIndex:colon.location];
+        NSString *ntfsSrc = [src substringFromIndex:colon.location + 1];
+        device = [device stringByReplacingOccurrencesOfString:@"/dev/" withString:@""];
+        NSString *hostDst = [dest stringByStandardizingPath];
+
+        [proxy copyFileFromNTFS:device
+                     sourcePath:ntfsSrc
+                destinationPath:hostDst
+                      withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
+            if (error || !result) {
+                fprintf(stderr, "Extract failed: %s\n", error ? error.localizedDescription.UTF8String : "Unknown error");
+                exitCode = 1;
+            } else {
+                if (jsonOutput) {
+                    NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil];
+                    printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+                } else {
+                    printf("==> Successfully extracted file from %s:%s to %s\n",
+                           device.UTF8String, ntfsSrc.UTF8String, hostDst.UTF8String);
+                }
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    }
+
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+    [conn invalidate];
+    return exitCode;
+}
+
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
         if (argc < 2) {
@@ -678,6 +852,35 @@ int main(int argc, const char * argv[]) {
             }
             NSString *target = [NSString stringWithUTF8String:argv[2]];
             return CommandUnmount(target);
+        }
+
+        if ([subcmd isEqualToString:@"ls"]) {
+            if (argc < 3) {
+                fprintf(stderr, "Usage: kty-ntfs ls <device>:[path] [--json]\n");
+                return 1;
+            }
+            NSString *target = [NSString stringWithUTF8String:argv[2]];
+            BOOL json = NO;
+            for (int i = 3; i < argc; i++) {
+                if (strcmp(argv[i], "--json") == 0) json = YES;
+            }
+            return CommandLS(target, json);
+        }
+
+        if ([subcmd isEqualToString:@"cp"]) {
+            if (argc < 4) {
+                fprintf(stderr, "Usage: kty-ntfs cp <src> <dest> [--allow-system-metadata] [--json]\n");
+                return 1;
+            }
+            NSString *src = [NSString stringWithUTF8String:argv[2]];
+            NSString *dest = [NSString stringWithUTF8String:argv[3]];
+            BOOL allowMeta = NO;
+            BOOL json = NO;
+            for (int i = 4; i < argc; i++) {
+                if (strcmp(argv[i], "--allow-system-metadata") == 0) allowMeta = YES;
+                if (strcmp(argv[i], "--json") == 0) json = YES;
+            }
+            return CommandCP(src, dest, allowMeta, json);
         }
 
         fprintf(stderr, "Unknown command: %s\n", subcmd.UTF8String);

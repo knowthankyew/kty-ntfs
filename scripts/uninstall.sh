@@ -49,6 +49,10 @@ rm -f "$BINDIR/kty-ntfsd"
 echo "[uninstall] Removing FSKit extension from $APPEX_DIR..."
 rm -rf "$APPEX_DIR/kty-ntfs-fs.appex"
 
+# 4. Remove Menu Bar UI Companion App
+echo "[uninstall] Removing Menu Bar UI companion from /Applications..."
+rm -rf "/Applications/kty-ntfs-menu.app"
+
 # 4. Optional log cleanup
 if [[ $PURGE_LOGS -eq 1 ]]; then
     echo "[uninstall] Purging daemon logs..."

@@ -32,6 +32,21 @@ allowSystemMetadata:(BOOL)allowSystemMetadata
 - (void)checkSafetyForTarget:(NSString *)target
                    withReply:(void (^)(NSDictionary * _Nullable report, NSError * _Nullable error))reply;
 
+- (void)listDirectoryOnDevice:(NSString *)deviceBSDName
+                         path:(NSString *)path
+                    withReply:(void (^)(NSArray<NSDictionary *> * _Nullable entries, NSError * _Nullable error))reply;
+
+- (void)copyFileToNTFS:(NSString *)deviceBSDName
+            sourcePath:(NSString *)sourcePath
+       destinationPath:(NSString *)destinationPath
+   allowSystemMetadata:(BOOL)allowSystemMetadata
+             withReply:(void (^)(NSDictionary * _Nullable result, NSError * _Nullable error))reply;
+
+- (void)copyFileFromNTFS:(NSString *)deviceBSDName
+              sourcePath:(NSString *)sourcePath
+         destinationPath:(NSString *)destinationPath
+               withReply:(void (^)(NSDictionary * _Nullable result, NSError * _Nullable error))reply;
+
 - (void)stopDaemonWithReply:(void (^)(BOOL success, NSError * _Nullable error))reply;
 
 @end

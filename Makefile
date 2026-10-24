@@ -29,10 +29,10 @@ LIB_DIR = $(BUILD_DIR)/lib
 OBJ_DIR = $(BUILD_DIR)/obj
 
 CORE_VENDOR_SRCS = $(wildcard src/core/vendor/libntfs-3g/*.c)
-CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c src/core/kty_crypto.c src/core/kty_safety.c
+CORE_SRCS = $(CORE_VENDOR_SRCS) src/core/kty_io.c src/core/kty_crypto.c src/core/kty_safety.c src/core/kty_transfer.c
 
-CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o $(OBJ_DIR)/arm64/kty_crypto.o $(OBJ_DIR)/arm64/kty_safety.o
-CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o $(OBJ_DIR)/x86_64/kty_crypto.o $(OBJ_DIR)/x86_64/kty_safety.o
+CORE_OBJS_ARM64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/arm64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/arm64/kty_io.o $(OBJ_DIR)/arm64/kty_crypto.o $(OBJ_DIR)/arm64/kty_safety.o $(OBJ_DIR)/arm64/kty_transfer.o
+CORE_OBJS_X86_64 = $(patsubst src/core/vendor/libntfs-3g/%.c,$(OBJ_DIR)/x86_64/vendor/%.o,$(CORE_VENDOR_SRCS)) $(OBJ_DIR)/x86_64/kty_io.o $(OBJ_DIR)/x86_64/kty_crypto.o $(OBJ_DIR)/x86_64/kty_safety.o $(OBJ_DIR)/x86_64/kty_transfer.o
 
 FSKIT_SRCS = src/fskit/KTYItem.m src/fskit/KTYVolume.m src/fskit/KTYUnaryFileSystem.m
 FSKIT_OBJS_ARM64 = $(patsubst src/fskit/%.m,$(OBJ_DIR)/arm64/fskit/%.o,$(FSKIT_SRCS))
@@ -46,11 +46,17 @@ CLI_SRCS = src/cli/main.m
 CLI_OBJS_ARM64 = $(OBJ_DIR)/arm64/cli/main.o
 CLI_OBJS_X86_64 = $(OBJ_DIR)/x86_64/cli/main.o
 
-.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture torture generate-bundle test verify-invariants audit-claims asan install uninstall
+MENU_SRCS = src/menu/main.m
+MENU_OBJS_ARM64 = $(OBJ_DIR)/arm64/menu/main.o
+MENU_OBJS_X86_64 = $(OBJ_DIR)/x86_64/menu/main.o
+MENU_FRAMEWORKS = -framework Cocoa
+MENU_APP = $(BIN_DIR)/kty-ntfs-menu.app
 
-all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture
+.PHONY: all clean core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli menu test_daemon_cli test_torture torture generate-bundle test verify-invariants audit-claims asan install uninstall
 
-$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit $(OBJ_DIR)/arm64/daemon $(OBJ_DIR)/x86_64/daemon $(OBJ_DIR)/arm64/cli $(OBJ_DIR)/x86_64/cli:
+all: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli menu test_daemon_cli test_torture
+
+$(BIN_DIR) $(LIB_DIR) $(LIB_DIR)/arm64 $(LIB_DIR)/x86_64 $(OBJ_DIR)/arm64/vendor $(OBJ_DIR)/x86_64/vendor $(OBJ_DIR)/arm64/fskit $(OBJ_DIR)/x86_64/fskit $(OBJ_DIR)/arm64/daemon $(OBJ_DIR)/x86_64/daemon $(OBJ_DIR)/arm64/cli $(OBJ_DIR)/x86_64/cli $(OBJ_DIR)/arm64/menu $(OBJ_DIR)/x86_64/menu:
 	@mkdir -p $@
 
 # --- Core Static Library Compilation ---
@@ -75,6 +81,10 @@ $(OBJ_DIR)/arm64/kty_safety.o: src/core/kty_safety.c | $(OBJ_DIR)/arm64/vendor
 	@echo "==> Compiling arm64: $<"
 	$(CC) $(CFLAGS_ARM64) -c $< -o $@
 
+$(OBJ_DIR)/arm64/kty_transfer.o: src/core/kty_transfer.c | $(OBJ_DIR)/arm64/vendor
+	@echo "==> Compiling arm64: $<"
+	$(CC) $(CFLAGS_ARM64) -c $< -o $@
+
 $(OBJ_DIR)/x86_64/kty_io.o: src/core/kty_io.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
@@ -84,6 +94,10 @@ $(OBJ_DIR)/x86_64/kty_crypto.o: src/core/kty_crypto.c | $(OBJ_DIR)/x86_64/vendor
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 
 $(OBJ_DIR)/x86_64/kty_safety.o: src/core/kty_safety.c | $(OBJ_DIR)/x86_64/vendor
+	@echo "==> Compiling x86_64: $<"
+	$(CC) $(CFLAGS_X86_64) -c $< -o $@
+
+$(OBJ_DIR)/x86_64/kty_transfer.o: src/core/kty_transfer.c | $(OBJ_DIR)/x86_64/vendor
 	@echo "==> Compiling x86_64: $<"
 	$(CC) $(CFLAGS_X86_64) -c $< -o $@
 
@@ -269,6 +283,39 @@ $(BIN_DIR)/kty-ntfs: $(BIN_DIR)/kty-ntfs_arm64 $(BIN_DIR)/kty-ntfs_x86_64 | $(BI
 cli: $(BIN_DIR)/kty-ntfs
 	@echo "==> Universal kty-ntfs CLI built successfully."
 
+# --- Phase 9 Menu Bar UI Companion (kty-ntfs-menu) ---
+
+$(OBJ_DIR)/arm64/menu/%.o: src/menu/%.m | $(OBJ_DIR)/arm64/menu
+	@echo "==> Compiling arm64 (menu): $<"
+	$(CC) $(OBJCFLAGS_ARM64) -Isrc/daemon -c $< -o $@
+
+$(OBJ_DIR)/x86_64/menu/%.o: src/menu/%.m | $(OBJ_DIR)/x86_64/menu
+	@echo "==> Compiling x86_64 (menu): $<"
+	$(CC) $(OBJCFLAGS_X86_64) -Isrc/daemon -c $< -o $@
+
+$(BIN_DIR)/kty-ntfs-menu_arm64: $(MENU_OBJS_ARM64) | $(BIN_DIR)
+	@echo "==> Linking arm64 Menu Bar binary: $@"
+	$(CC) $(OBJCFLAGS_ARM64) $^ $(MENU_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs-menu_x86_64: $(MENU_OBJS_X86_64) | $(BIN_DIR)
+	@echo "==> Linking x86_64 Menu Bar binary: $@"
+	$(CC) $(OBJCFLAGS_X86_64) $^ $(MENU_FRAMEWORKS) -o $@
+
+$(BIN_DIR)/kty-ntfs-menu: $(BIN_DIR)/kty-ntfs-menu_arm64 $(BIN_DIR)/kty-ntfs-menu_x86_64 | $(BIN_DIR)
+	@echo "==> Creating universal Menu Bar binary: $@"
+	$(LIPO) -create -output $@ $^
+
+$(MENU_APP): $(BIN_DIR)/kty-ntfs-menu src/menu/Info.plist | $(BIN_DIR)
+	@echo "==> Packaging Menu Bar App bundle: $@"
+	@rm -rf $@
+	@mkdir -p $@/Contents/MacOS
+	@cp src/menu/Info.plist $@/Contents/Info.plist
+	@cp $(BIN_DIR)/kty-ntfs-menu $@/Contents/MacOS/kty-ntfs-menu
+	@./scripts/codesign-adhoc.sh $@
+
+menu: $(MENU_APP)
+	@echo "==> Universal kty-ntfs-menu.app built successfully."
+
 # --- Phase 5 Daemon & CLI Test Harness ---
 
 $(OBJ_DIR)/arm64/test_daemon_cli.o: tests/test_daemon_cli.m | $(OBJ_DIR)/arm64/daemon
@@ -339,7 +386,7 @@ audit-claims:
 	@echo "==> Auditing portfolio claims, licensing parity, and zero-egress invariants..."
 	@./scripts/audit-claims.py
 
-verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge $(BIN_DIR)/kty-ntfsd $(BIN_DIR)/kty-ntfs $(BIN_DIR)/test_daemon_cli $(BIN_DIR)/test_torture
+verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kty-ntfs-fs $(BIN_DIR)/test_fskit_bridge $(BIN_DIR)/kty-ntfsd $(BIN_DIR)/kty-ntfs $(BIN_DIR)/kty-ntfs-menu $(BIN_DIR)/test_daemon_cli $(BIN_DIR)/test_torture
 	@echo "==> Auditing Mach-O binaries for zero network symbols (KTY Invariant 1)..."
 	@for bin in $^; do \
 		echo "    Checking $$bin..."; \
@@ -350,7 +397,7 @@ verify-invariants: $(BIN_DIR)/smoke_test $(BIN_DIR)/test_ntfs_core $(BIN_DIR)/kt
 	done
 	@echo "==> Invariant verified: 0 network symbols found across all binaries."
 
-test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli test_daemon_cli test_torture verify-invariants audit-claims
+test: core smoke_test test_ntfs_core fskit test_fskit_bridge daemon cli menu test_daemon_cli test_torture verify-invariants audit-claims
 
 asan:
 	$(MAKE) clean

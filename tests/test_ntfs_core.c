@@ -13,6 +13,7 @@
 #include "kty_io.h"
 #include "kty_crypto.h"
 #include "kty_safety.h"
+#include "kty_transfer.h"
 #include "ntfs-3g/types.h"
 #include "ntfs-3g/layout.h"
 #include "ntfs-3g/bootsect.h"
@@ -331,6 +332,46 @@ int main(void) {
 
     unlink(hiber_path);
     rmdir(test_dir);
+    printf("PASS\n");
+
+    /* -------------------------------------------------------------
+     * Test 7: Direct File Transfer validation and forensic safety
+     * ------------------------------------------------------------- */
+    printf("[test_ntfs_core] Test 7: Direct File Transfer validation and forensic safety... ");
+    kty_dir_listing_t listing;
+
+    /* Invalid arguments */
+    assert(kty_transfer_list_dir(NULL, "/", &listing) == -EINVAL);
+    assert(kty_transfer_list_dir("disk0s1", "/", NULL) == -EINVAL);
+    assert(kty_transfer_copy_to_ntfs(NULL, "a", "b", false, NULL, NULL) == -EINVAL);
+    assert(kty_transfer_copy_to_ntfs("dev", NULL, "b", false, NULL, NULL) == -EINVAL);
+    assert(kty_transfer_copy_to_ntfs("dev", "a", NULL, false, NULL, NULL) == -EINVAL);
+    assert(kty_transfer_copy_from_ntfs(NULL, "a", "b") == -EINVAL);
+    assert(kty_transfer_copy_from_ntfs("dev", NULL, "b") == -EINVAL);
+    assert(kty_transfer_copy_from_ntfs("dev", "a", NULL) == -EINVAL);
+
+    /* Free NULL listing is safe */
+    kty_transfer_free_listing(NULL);
+    memset(&listing, 0, sizeof(listing));
+    kty_transfer_free_listing(&listing);
+
+    /* Non-existent source file */
+    assert(kty_transfer_copy_to_ntfs("disk0s1", "/nonexistent/test_file_12345.bin", "/test.bin", false, NULL, NULL) == -ENOENT);
+
+    /* Forensic metadata suppression */
+    char temp_dir_trans[] = "/tmp/kty_transfer_test_XXXXXX";
+    assert(mkdtemp(temp_dir_trans) != NULL);
+    char ds_store_path[512];
+    snprintf(ds_store_path, sizeof(ds_store_path), "%s/.DS_Store", temp_dir_trans);
+    int trans_fd = open(ds_store_path, O_CREAT | O_WRONLY, 0644);
+    assert(trans_fd >= 0);
+    close(trans_fd);
+
+    /* When allow_system_metadata is false, copying .DS_Store is rejected with -EPERM */
+    assert(kty_transfer_copy_to_ntfs("disk0s1", ds_store_path, "/.DS_Store", false, NULL, NULL) == -EPERM);
+
+    unlink(ds_store_path);
+    rmdir(temp_dir_trans);
     printf("PASS\n");
 
     printf("[test_ntfs_core] All headless NTFS engine tests passed successfully!\n");

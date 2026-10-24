@@ -408,7 +408,80 @@ static void test_daemon_xpc_lifecycle_and_operations(void) {
             rmdir(tempVol);
         }
 
-        /* 11. Disk disappears */
+        /* 11. Direct Transfer XPC APIs */
+        {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnonnull"
+            /* 11a: listDirectoryOnDevice with nil arguments */
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            __block NSError *listErr = nil;
+            [proxy listDirectoryOnDevice:nil path:nil withReply:^(NSArray<NSDictionary *> * _Nullable entries, NSError * _Nullable error) {
+                (void)entries;
+                listErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(listErr != nil);
+            assert(listErr.code == EINVAL);
+
+            /* 11b: copyFileToNTFS with nil arguments */
+            sem = dispatch_semaphore_create(0);
+            __block NSError *cpToErr = nil;
+            [proxy copyFileToNTFS:nil sourcePath:nil destinationPath:nil allowSystemMetadata:NO withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
+                (void)result;
+                cpToErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(cpToErr != nil);
+            assert(cpToErr.code == EINVAL);
+
+            /* 11c: copyFileFromNTFS with nil arguments */
+            sem = dispatch_semaphore_create(0);
+            __block NSError *cpFromErr = nil;
+            [proxy copyFileFromNTFS:nil sourcePath:nil destinationPath:nil withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
+                (void)result;
+                cpFromErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(cpFromErr != nil);
+            assert(cpFromErr.code == EINVAL);
+#pragma clang diagnostic pop
+
+            /* 11d: copyFileToNTFS fails closed when Fast Startup / hibernation is active */
+            char hibDir[] = "/tmp/kty_xpc_hib_test_XXXXXX";
+            assert(mkdtemp(hibDir) != NULL);
+            NSString *hibVolPath = [NSString stringWithUTF8String:hibDir];
+            NSString *hibFilePath = [hibVolPath stringByAppendingPathComponent:@"hiberfil.sys"];
+            int hfd2 = open(hibFilePath.UTF8String, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+            assert(hfd2 >= 0);
+            uint8_t hibr_bytes[4096] = {'h', 'i', 'b', 'r', 0};
+            assert(write(hfd2, hibr_bytes, sizeof(hibr_bytes)) == sizeof(hibr_bytes));
+            close(hfd2);
+
+            NSString *dummySrc = [hibVolPath stringByAppendingPathComponent:@"source.txt"];
+            [@"Hello" writeToFile:dummySrc atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+            sem = dispatch_semaphore_create(0);
+            __block NSError *fastBootRejectErr = nil;
+            [proxy copyFileToNTFS:hibVolPath sourcePath:dummySrc destinationPath:@"/destination.txt" allowSystemMetadata:NO withReply:^(NSDictionary * _Nullable result, NSError * _Nullable error) {
+                (void)result;
+                fastBootRejectErr = error;
+                dispatch_semaphore_signal(sem);
+            }];
+            assert(dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0);
+            assert(fastBootRejectErr != nil);
+            assert(fastBootRejectErr.code == EPERM);
+            assert([fastBootRejectErr.userInfo[@"KTYFastStartupActive"] boolValue] == YES);
+            assert([fastBootRejectErr.userInfo[@"KTYGuidance"] containsString:@"Turn off Fastboot"] || [fastBootRejectErr.userInfo[@"KTYGuidance"] containsString:@"disable fastboot"]);
+
+            unlink(dummySrc.UTF8String);
+            unlink(hibFilePath.UTF8String);
+            rmdir(hibDir);
+        }
+
+        /* 12. Disk disappears */
         [daemon registerDiskDisappeared:@"disk7s1"];
         assert(daemon.detectedDisks[@"disk7s1"] == nil);
 
@@ -532,6 +605,22 @@ static void test_cli_subcommands(const char *cliPath) {
             assert(configRc == 1);
             assert([outStr containsString:@"Error connecting to daemon"] || [outStr containsString:@"Error:"]);
         }
+
+        /* Test ls command validation */
+        assert(runCLI(@[@"ls"], &outStr) == 1);
+        assert([outStr containsString:@"Usage:"] || [outStr containsString:@"Target required"]);
+
+        /* Test cp command validation */
+        assert(runCLI(@[@"cp"], &outStr) == 1);
+        assert([outStr containsString:@"Usage: kty-ntfs cp"]);
+
+        assert(runCLI(@[@"cp", @"only_one_arg"], &outStr) == 1);
+        assert([outStr containsString:@"Usage: kty-ntfs cp"]);
+
+        /* Test cp with invalid arguments (missing colon or target syntax) */
+        int cpInvalidRc = runCLI(@[@"cp", @"fileA.txt", @"fileB.txt"], &outStr);
+        assert(cpInvalidRc == 1);
+        assert([outStr containsString:@"must specify an NTFS device"]);
 
         /* Non-existent unmount target must always fail closed */
         int unmountRc = runCLI(@[@"unmount", @"non_existent_target_12345"], &outStr);
