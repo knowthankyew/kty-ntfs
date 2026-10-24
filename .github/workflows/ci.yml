@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify Zero-Egress & Claims Parity Gate (Pre-Build)
         run: python3 ./scripts/audit-claims.py
@@ -58,7 +58,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Attest Build Provenance (SLSA)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         if: github.ref == 'refs/heads/main'
         with:
           subject-path: |
@@ -68,7 +68,7 @@ jobs:
             dist/kty-ntfs-fs-v0.1.0.zip
 
       - name: Upload Build & SBOM Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kty-ntfs-release-bundle
           path: |
