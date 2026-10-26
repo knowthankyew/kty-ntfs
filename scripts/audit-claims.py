@@ -177,6 +177,41 @@ def check_zero_egress(root: Path, errors: list[str]) -> None:
                     fail(errors, f"Zero-egress violation in {rel}: prohibited symbols {violations}")
 
 
+PROHIBITED_WORDS = [
+    re.compile(r"\bbulletproof\b", re.IGNORECASE),
+    re.compile(r"\bconclusive\b", re.IGNORECASE),
+    re.compile(r"\bdefinitive\b", re.IGNORECASE),
+    re.compile(r"\binfinitely scalable\b", re.IGNORECASE),
+]
+
+
+def check_vocabulary_guardrails(root: Path, errors: list[str]) -> None:
+    docs_to_scan = [
+        "docs/ARCHITECTURE.md",
+        "README.md",
+        "ROADMAP.md",
+        "NOTICE.md",
+    ]
+    for rel_path in docs_to_scan:
+        target = root / rel_path
+        if not target.is_file():
+            continue
+        text = read_text_checked(root, rel_path, errors)
+        if text is None:
+            continue
+        for idx, line in enumerate(text.splitlines(), 1):
+            lower = line.lower()
+            if "prohibit" in lower or "forbidden" in lower or "guardrail" in lower:
+                continue
+            for pattern in PROHIBITED_WORDS:
+                if pattern.search(line):
+                    fail(
+                        errors,
+                        f"Vocabulary violation in {rel_path}:{idx}: "
+                        f"Prohibited term matching '{pattern.pattern}' found: '{line.strip()}'",
+                    )
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     errors: list[str] = []
@@ -185,6 +220,7 @@ def main() -> int:
     check_entitlements_and_notice_parity(root, errors)
     check_licensing_and_portfolio_claims(root, errors)
     check_zero_egress(root, errors)
+    check_vocabulary_guardrails(root, errors)
 
     print(f"=== kty-ntfs Claims & Architecture Audit (v{version}) ===")
     if errors:
