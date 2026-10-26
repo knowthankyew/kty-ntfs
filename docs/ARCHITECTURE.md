@@ -1,6 +1,6 @@
 <!-- diagram-meta
   last-validated: 2026-10-26
-  validated-commit: c8e0644
+  validated-commit: a412d77
   covers: [src/**, scripts/**, Makefile, Formula/**]
   generated-by: manual
 -->
