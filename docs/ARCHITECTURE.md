@@ -1,5 +1,6 @@
 <!-- diagram-meta
-  last-validated: 2026-10-24
+  last-validated: 2026-10-26
+  validated-commit: c8e0644
   covers: [src/**, scripts/**, Makefile, Formula/**]
   generated-by: manual
 -->
@@ -41,26 +42,26 @@ While the broader `knowthankyew` portfolio defaults to the permissive **MIT Lice
 flowchart TD
     subgraph Invokers["1. Consumers & Evidence Ingestion"]
         Pipelines["🔬 knowthankyew Evidence Pipelines<br/><i>(Screen captures, dispute letters, logs)</i>"]
-        CLI["💻 Companion CLI (kty-ntfs)<br/><i>(mount, unmount, list, status)</i>"]
+        CLI["💻 Companion CLI (kty-ntfs)<br/><code>src/cli/main.m</code>"]
         ForensicTools["🛠️ Third-Party Forensic & DFIR Tools"]
     end
 
     subgraph DaemonLayer["2. Autonomous System Daemon (kty-ntfsd)"]
-        DA["⚙️ DiskArbitration Interceptor<br/><i>DARegisterDiskAppearedCallback</i>"]
-        XPC["📡 Mach XPC Service Listener<br/><code>com.knowthankyew.ntfsd</code>"]
+        DA["⚙️ DiskArbitration Interceptor<br/><code>src/daemon/main.m</code>"]
+        XPC["📡 Mach XPC Service Listener<br/><code>src/daemon/KTYDaemon.m</code>"]
         ClaimEngine["🔒 Partition Claim & Auto-Mount Coordinator<br/><i>Rejects default read-only mount</i>"]
     end
 
     subgraph FSKitExtension["3. Native FSKit File System Extension (kty-ntfs-fs.appex)"]
-        FSKCore["🍏 Apple FSKit Subsystem<br/><code>FSUnaryFileSystem & FSBlockDeviceResource</code>"]
-        HygieneFilter["🛡️ Forensic Hygiene Filter<br/><i>Tombstones .DS_Store, Spotlight, ._* in RAM</i>"]
-        ADSMapper["📑 Alternate Data Stream (ADS) Engine<br/><i>Maps xattrs & BLAKE3/SHA-256 tree hashes</i>"]
+        FSKCore["🍏 Apple FSKit Subsystem<br/><code>src/fskit/KTYUnaryFileSystem.m</code>"]
+        HygieneFilter["🛡️ Forensic Hygiene Filter<br/><code>src/core/kty_safety.c</code>"]
+        ADSMapper["📑 Alternate Data Stream (ADS) Engine<br/><code>src/core/kty_crypto.c</code>"]
     end
 
     subgraph EngineCore["4. Headless libntfs-3g Engine (libkty_ntfs_core.a)"]
         MFT["🗂️ Master File Table ($MFT) Parser & B-Tree"]
         Journal["📜 Synchronous $LogFile & $UsnJrnl Commits"]
-        ClusterAlloc["💾 Low-Level Cluster Allocation & Sector I/O"]
+        ClusterAlloc["💾 Low-Level Cluster Allocation & Sector I/O<br/><code>src/core/kty_io.c</code>"]
     end
 
     subgraph PhysicalMedia["5. Destination Storage"]

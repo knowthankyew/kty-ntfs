@@ -178,7 +178,8 @@ def check_zero_egress(root: Path, errors: list[str]) -> None:
 
 
 PROHIBITED_WORDS = [
-    re.compile(r"\bbulletproof\b", re.IGNORECASE),
+    re.compile(r"\bbullet-?proof\b", re.IGNORECASE),
+    re.compile(r"\brock\s+solid\b", re.IGNORECASE),
     re.compile(r"\bconclusive\b", re.IGNORECASE),
     re.compile(r"\bdefinitive\b", re.IGNORECASE),
     re.compile(r"\binfinitely scalable\b", re.IGNORECASE),
@@ -187,11 +188,13 @@ PROHIBITED_WORDS = [
 
 def check_vocabulary_guardrails(root: Path, errors: list[str]) -> None:
     docs_to_scan = [
-        "docs/ARCHITECTURE.md",
         "README.md",
         "ROADMAP.md",
         "NOTICE.md",
     ]
+    docs_dir = root / "docs"
+    if docs_dir.is_dir():
+        docs_to_scan.extend([str(f.relative_to(root)) for f in sorted(docs_dir.glob("*.md"))])
     for rel_path in docs_to_scan:
         target = root / rel_path
         if not target.is_file():
